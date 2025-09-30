@@ -119,12 +119,14 @@ def fmt_x_decades(v, pos):
 
 
 def compute_sizes(n: pd.Series) -> pd.Series:
-    """
-    Match the base plot feel: size grows ~sqrt(n). Keep a small floor so
-    single-swap points remain visible, and avoid huge circles.
-    """
-    n = pd.to_numeric(n, errors="coerce").fillna(0).clip(lower=0)
-    return 10.0 + 3.6 * np.sqrt(n)  # scatter 's' is in points^2 already
+    """Match the base address bubble sizing (area ~ direct swap count)."""
+
+    # The base plot (`plot_tdccp_address_bubble.py`) uses sqrt(count) * 40 for
+    # the scatter ``s`` value which keeps single-transaction addresses visible
+    # while giving multi-hundred swap actors a noticeable—but not overpowering—
+    # footprint.  Mirroring that here keeps the two plots visually aligned.
+    n = pd.to_numeric(n, errors="coerce").fillna(0).clip(lower=1)
+    return np.sqrt(n) * 40.0
 
 
 # ----------------------------- plotting --------------------------------
@@ -180,13 +182,16 @@ def plot_bubbles_by_label(
         color_map["Other"] = "#D3D3D3"
         labels_present = ["Other"] + [l for l in labels_present if l != "Other"]
     # Assign the rest
-    for i, lab in enumerate(labels_present):
+    color_idx = 0
+    for lab in labels_present:
         if lab == "Other":
             continue
-        color_map[lab] = base_colors[i % len(base_colors)]
+        color_map[lab] = base_colors[color_idx % len(base_colors)]
+        color_idx += 1
 
     # Figure
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    ax.set_facecolor("white")
 
     # X axis: log10 with minor ticks (2..9), same as base chart
     ax.set_xscale("log", base=10)
@@ -217,10 +222,11 @@ def plot_bubbles_by_label(
         ax.scatter(
             sub.loc[mask, "peak_balance_ui"],
             sub.loc[mask, "net_ui"],
-            s=(sizes.loc[mask] *3).to_numpy(),
+            s=sizes.loc[mask].to_numpy(),
             color=color_map.get(lab, "#D3D3D3"),
-            alpha=0.65,
-            linewidths=0.0,
+            alpha=0.6,
+            edgecolors="black",
+            linewidths=0.5,
             label=lab,
         )
 
@@ -228,9 +234,10 @@ def plot_bubbles_by_label(
     title = "Address Bubbles — TDCCP"
     if window_label:
         title += f" — {window_label}"
-    ax.set_title(title, pad=10)
-    ax.set_xlabel("Peak Balance (TDCCP)")
-    ax.set_ylabel("Net Volume (TDCCP)")
+    ax.set_title(title, pad=16, fontsize=20)
+    ax.set_xlabel("Peak Balance (TDCCP)", fontsize=16)
+    ax.set_ylabel("Net Volume (TDCCP)", fontsize=16)
+    ax.tick_params(axis="both", labelsize=13)
 
     # Legend: keep in the same upper-left spot
     lgd = ax.legend(
@@ -239,13 +246,16 @@ def plot_bubbles_by_label(
         frameon=True,
         framealpha=0.9,
         borderpad=0.6,
+        fontsize=12,
+        title_fontsize=13,
+        scatterpoints=1,
     )
 
     # Save
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     out = outfile if outfile else OUT_DIR / f"Address_Bubbles_byLabel_{window_label or ''}.png"
     fig.tight_layout()
-    fig.savefig(out)
+    fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     print(f"[done] {out}")
     return out
