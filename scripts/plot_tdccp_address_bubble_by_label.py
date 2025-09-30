@@ -4,12 +4,17 @@ from __future__ import annotations
 import argparse
 import csv
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
+import re
+
+import colorsys
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.ticker import LogLocator, NullFormatter, FuncFormatter
+from matplotlib.lines import Line2D
+from matplotlib import colors as mcolors
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
@@ -19,16 +24,18 @@ OUT_DIR = ROOT / "outputs" / "figures"
 
 
 # ----------------------------- helpers ---------------------------------
-def read_settings_labels(settings_csv: Path) -> Dict[str, str]:
+def read_settings_labels(settings_csv: Path) -> Tuple[Dict[str, str], List[str]]:
     """
     Read address labels from settings.csv into {from_address: label}.
     Expects rows where Category (first column) == 'address', Key is the
     address, and Value is the label.
     """
     if not settings_csv.exists():
-        return {}
+        return {}, []
 
     addr_map: Dict[str, str] = {}
+    ordered_labels: List[str] = []
+    seen_labels: set[str] = set()
     key_idx, val_idx, cat_idx = 1, 2, 0
 
     with settings_csv.open("r", encoding="utf-8") as f:
@@ -51,8 +58,11 @@ def read_settings_labels(settings_csv: Path) -> Dict[str, str]:
             label = (row[val_idx] or "").strip()
             if addr and label:
                 addr_map[addr] = label
+                if label not in seen_labels:
+                    ordered_labels.append(label)
+                    seen_labels.add(label)
 
-    return addr_map
+    return addr_map, ordered_labels
 
 
 def human_range_label(start: Optional[str], end: Optional[str]) -> Optional[str]:
@@ -119,26 +129,184 @@ def fmt_x_decades(v, pos):
 
 
 def compute_sizes(n: pd.Series) -> pd.Series:
-    """
-    Match the base plot feel: size grows ~sqrt(n). Keep a small floor so
-    single-swap points remain visible, and avoid huge circles.
-    """
-    n = pd.to_numeric(n, errors="coerce").fillna(0).clip(lower=0)
-    return 10.0 + 3.6 * np.sqrt(n)  # scatter 's' is in points^2 already
+    """Match the base address bubble sizing (area ~ direct swap count)."""
+
+    # The base plot (`plot_tdccp_address_bubble.py`) uses sqrt(count) * 40 for
+    # the scatter ``s`` value which keeps single-transaction addresses visible
+    # while giving multi-hundred swap actors a noticeable—but not overpowering—
+    # footprint.  Mirroring that here keeps the two plots visually aligned.
+    n = pd.to_numeric(n, errors="coerce").fillna(0).clip(lower=1)
+    return np.sqrt(n) * 40.0
+
+
+def slugify_label(label: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", label.strip()).strip("_")
+    return slug or "group"
+
+
+def build_vibrant_palette(count: int) -> List[str]:
+    """Return a list of high-contrast, saturated colors for the given count."""
+
+    if count <= 0:
+        return []
+
+    palette: List[str] = []
+    tableau = list(mcolors.TABLEAU_COLORS.values())
+    palette.extend(tableau[: min(count, len(tableau))])
+
+    if len(palette) == count:
+        return palette
+
+    remaining = count - len(palette)
+
+    # Spread additional colors around the HSV wheel using the golden ratio to
+    # avoid repeating hues while keeping saturation/value high for vibrancy.
+    golden_ratio = 0.61803398875
+    hue = 0.0
+    for idx in range(remaining):
+        hue = (hue + golden_ratio) % 1.0
+        saturation = 0.78 if idx % 3 == 0 else 0.88
+        value = 0.9 if idx % 2 == 0 else 0.82
+        r, g, b = colorsys.hsv_to_rgb(hue, saturation, value)
+        palette.append(mcolors.to_hex((r, g, b)))
+
+    return palette
 
 
 # ----------------------------- plotting --------------------------------
+def render_bubble_plot(
+    sub: pd.DataFrame,
+    sizes: pd.Series,
+    label_series: pd.Series,
+    display_labels: List[str],
+    color_map: Dict[str, str],
+    window_label: Optional[str],
+    dpi: int,
+    figsize: Tuple[float, float],
+    highlight_label: Optional[str] = None,
+    outfile: Optional[Path] = None,
+) -> Path:
+    highlight_colors: Dict[str, str] = {}
+    if highlight_label:
+        for lab in display_labels:
+            if lab == highlight_label:
+                if highlight_label == "Other":
+                    highlight_colors[lab] = "#8C8C8C"
+                else:
+                    highlight_colors[lab] = color_map.get(lab, "#1f77b4")
+            elif lab == "Other":
+                highlight_colors[lab] = "#D3D3D3"
+            else:
+                highlight_colors[lab] = "#E0E0E0"
+
+    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    ax.set_facecolor("white")
+
+    ax.set_xscale("log", base=10)
+    ax.xaxis.set_major_locator(LogLocator(base=10))
+    ax.xaxis.set_major_formatter(FuncFormatter(fmt_x_decades))
+    ax.xaxis.set_minor_locator(LogLocator(base=10, subs=tuple(np.arange(2, 10) * 0.1)))
+    ax.xaxis.set_minor_formatter(NullFormatter())
+
+    max_x = sub["peak_balance_ui"].max()
+    right = 10 ** np.ceil(np.log10(max(1.0, max_x)))
+    ax.set_xlim(left=1.0, right=right)
+
+    ax.set_yscale("symlog", base=10, linthresh=1.0, linscale=1.0)
+    ax.yaxis.set_major_formatter(FuncFormatter(fmt_y_plain))
+    ax.axhline(0, color="#606060", linewidth=1.0, alpha=0.8, zorder=0)
+
+    ax.grid(True, which="major", linestyle="--", alpha=0.35)
+    ax.grid(True, which="minor", axis="x", linestyle=":", alpha=0.2)
+
+    legend_handles: List = []
+    legend_labels: List[str] = []
+    for lab in display_labels:
+        mask = (label_series == lab)
+        color = highlight_colors.get(lab, color_map.get(lab, "#D3D3D3"))
+        if mask.any():
+            scatter = ax.scatter(
+                sub.loc[mask, "peak_balance_ui"],
+                sub.loc[mask, "net_ui"],
+                s=sizes.loc[mask].to_numpy(),
+                color=color,
+                alpha=0.6,
+                edgecolors="black",
+                linewidths=0.5,
+                label=lab,
+            )
+            legend_handles.append(scatter)
+            legend_labels.append(lab)
+        else:
+            proxy = Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="white",
+                markerfacecolor=color,
+                markeredgecolor="black",
+                markeredgewidth=0.5,
+                markersize=10,
+            )
+            legend_handles.append(proxy)
+            legend_labels.append(lab)
+
+    title = "Address Bubbles — TDCCP"
+    if window_label:
+        title += f" — {window_label}"
+    if highlight_label:
+        title += f" — Highlight: {highlight_label}"
+    ax.set_title(title, pad=16, fontsize=20)
+    ax.set_xlabel("Peak Balance (TDCCP)", fontsize=16)
+    ax.set_ylabel("Net Volume (TDCCP)", fontsize=16)
+    ax.tick_params(axis="both", labelsize=13)
+
+    ax.legend(
+        legend_handles,
+        legend_labels,
+        title="Address labels (settings.csv)",
+        loc="upper left",
+        frameon=True,
+        framealpha=0.9,
+        borderpad=0.6,
+        fontsize=12,
+        title_fontsize=13,
+        scatterpoints=1,
+    )
+
+    if outfile:
+        out = outfile
+    else:
+        suffix = f"_{window_label}" if window_label else "_"
+        if highlight_label:
+            slug = slugify_label(highlight_label)
+            out = OUT_DIR / f"Address_Bubbles_byLabel{suffix}_highlight_{slug}.png"
+        else:
+            out = OUT_DIR / f"Address_Bubbles_byLabel{suffix}.png"
+
+    fig.tight_layout(pad=0.6)
+    fig.savefig(out, bbox_inches="tight", dpi=dpi)
+    plt.close(fig)
+    print(f"[done] {out}")
+    return out
+
+
 def plot_bubbles_by_label(
     df: pd.DataFrame,
     addr_labels: Dict[str, str],
+    label_order: List[str],
     window_label: Optional[str],
     outfile: Optional[Path] = None,
-    dpi: int = 150,
-    figsize: Tuple[float, float] = (24.0, 10.0),
-) -> Path:
+    dpi: int = 400,
+    figsize: Tuple[float, float] = (24.0, 12.0),
+) -> List[Path]:
     """
-    Render address bubble plot with colors driven by settings labels.
-    Keeps axes, sizing, grid, and legend placement identical to the base chart.
+    Render address bubble plots with colors driven by settings labels.
+    Produces the combined view plus per-label highlight variants.
+    ``label_order`` should be the ordered unique label list pulled from
+    settings.csv so that colors/legend entries remain stable as categories
+    expand.
+    Returns the list of generated figure paths.
     """
 
     # Expected columns from metrics:
@@ -166,89 +334,76 @@ def plot_bubbles_by_label(
 
     # Labels from settings
     label_series = sub["from_address"].map(addr_labels).fillna("Other")
-    labels_present = list(label_series.unique())
 
-    # A compact, readable palette—one color per label, 'Other' as light gray
-    base_colors = [
-        "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
-        "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
-        "#bcbd22", "#17becf",
-    ]
-    color_map: Dict[str, str] = {}
-    # Put 'Other' first and gray it
-    if "Other" in labels_present:
-        color_map["Other"] = "#D3D3D3"
-        labels_present = ["Other"] + [l for l in labels_present if l != "Other"]
-    # Assign the rest
-    for i, lab in enumerate(labels_present):
-        if lab == "Other":
-            continue
-        color_map[lab] = base_colors[i % len(base_colors)]
+    # Determine display order: 'Other' (if present in data), then each
+    # settings-defined label in file order, then any additional labels that
+    # slipped through (unlikely but keeps things robust).
+    display_labels: List[str] = []
+    if (label_series == "Other").any():
+        display_labels.append("Other")
+    for lab in label_order:
+        if lab not in display_labels:
+            display_labels.append(lab)
+    for lab in label_series.unique():
+        if lab not in display_labels:
+            display_labels.append(lab)
 
-    # Figure
-    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    # Build a dynamic palette: 'Other' stays light gray, address-label colors
+    # draw from a vibrant generator that starts with Tableau's saturated hues
+    # and then rotates evenly around the color wheel.  This keeps each label
+    # visually distinct even as new groups are added to settings.csv.
+    color_map: Dict[str, str] = {"Other": "#D3D3D3"}
+    non_other = [lab for lab in display_labels if lab != "Other"]
+    if non_other:
+        vibrant_colors = build_vibrant_palette(len(non_other))
+        color_idx = 0
+        for lab in label_order:
+            if lab == "Other" or lab not in display_labels:
+                continue
+            color_map[lab] = vibrant_colors[color_idx % len(vibrant_colors)]
+            color_idx += 1
+        for lab in display_labels:
+            if lab == "Other" or lab in color_map:
+                continue
+            color_map[lab] = vibrant_colors[color_idx % len(vibrant_colors)]
+            color_idx += 1
 
-    # X axis: log10 with minor ticks (2..9), same as base chart
-    ax.set_xscale("log", base=10)
-    ax.xaxis.set_major_locator(LogLocator(base=10))
-    ax.xaxis.set_major_formatter(FuncFormatter(fmt_x_decades))
-    ax.xaxis.set_minor_locator(LogLocator(base=10, subs=tuple(np.arange(2, 10) * 0.1)))
-    ax.xaxis.set_minor_formatter(NullFormatter())
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Force left bound at 1 (to match the base look) and right to next decade
-    max_x = sub["peak_balance_ui"].max()
-    right = 10 ** np.ceil(np.log10(max(1.0, max_x)))
-    ax.set_xlim(left=1.0, right=right)
+    outputs: List[Path] = []
+    combined_out = render_bubble_plot(
+        sub,
+        sizes,
+        label_series,
+        display_labels,
+        color_map,
+        window_label,
+        dpi,
+        figsize,
+        highlight_label=None,
+        outfile=outfile,
+    )
+    outputs.append(combined_out)
 
-    # Y axis: symmetric log with plain numeric labels and a zero line
-    ax.set_yscale("symlog", base=10, linthresh=1.0, linscale=1.0)
-    ax.yaxis.set_major_formatter(FuncFormatter(fmt_y_plain))
-    ax.axhline(0, color="#606060", linewidth=1.0, alpha=0.8, zorder=0)
-
-    # Grid to match base
-    ax.grid(True, which="major", linestyle="--", alpha=0.35)
-    ax.grid(True, which="minor", axis="x", linestyle=":", alpha=0.2)
-
-    # Scatter by label (only color has changed vs base)
-    for lab in labels_present:
-        mask = (label_series == lab)
+    for lab in display_labels:
+        mask = label_series == lab
         if not mask.any():
             continue
-        ax.scatter(
-            sub.loc[mask, "peak_balance_ui"],
-            sub.loc[mask, "net_ui"],
-            s=(sizes.loc[mask] *3).to_numpy(),
-            color=color_map.get(lab, "#D3D3D3"),
-            alpha=0.65,
-            linewidths=0.0,
-            label=lab,
+        highlight_out = render_bubble_plot(
+            sub,
+            sizes,
+            label_series,
+            display_labels,
+            color_map,
+            window_label,
+            dpi,
+            figsize,
+            highlight_label=lab,
+            outfile=None,
         )
+        outputs.append(highlight_out)
 
-    # Titles & labels (same positions/wording as base)
-    title = "Address Bubbles — TDCCP"
-    if window_label:
-        title += f" — {window_label}"
-    ax.set_title(title, pad=10)
-    ax.set_xlabel("Peak Balance (TDCCP)")
-    ax.set_ylabel("Net Volume (TDCCP)")
-
-    # Legend: keep in the same upper-left spot
-    lgd = ax.legend(
-        title="Address labels (settings.csv)",
-        loc="upper left",
-        frameon=True,
-        framealpha=0.9,
-        borderpad=0.6,
-    )
-
-    # Save
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    out = outfile if outfile else OUT_DIR / f"Address_Bubbles_byLabel_{window_label or ''}.png"
-    fig.tight_layout()
-    fig.savefig(out)
-    plt.close(fig)
-    print(f"[done] {out}")
-    return out
+    return outputs
 
 
 # ------------------------------ CLI ------------------------------------
@@ -260,8 +415,8 @@ def main():
     ap.add_argument("--settings", default=str(SETTINGS), help="Path to settings.csv")
     ap.add_argument("--window-label", default=None, help="Text to append in the title (e.g., 20250301-20250505)")
     ap.add_argument("--outfile", default=None, help="Output PNG path (defaults to outputs/figures/Address_Bubbles_byLabel_*.png)")
-    ap.add_argument("--dpi", type=int, default=300, help="Figure DPI (default: 150)")
-    ap.add_argument("--figsize", default="40,20", help="Width,height in inches (default: 24,10)")
+    ap.add_argument("--dpi", type=int, default=400, help="Figure DPI (default: 400)")
+    ap.add_argument("--figsize", default="24,12", help="Figure size in inches (width,height)")
     # accepted but ignored—keeps pipeline compatibility without altering output
     ap.add_argument("--top-labels", type=int, default=0, help="(ignored) kept only for pipeline compatibility")
 
@@ -275,7 +430,7 @@ def main():
     df = pd.read_csv(metrics_path)
 
     # load labels
-    labels_map = read_settings_labels(Path(args.settings))
+    labels_map, label_order = read_settings_labels(Path(args.settings))
 
     # window label
     win_lbl = args.window_label
@@ -288,10 +443,18 @@ def main():
         w_str, h_str = (args.figsize.split(",", 1) if "," in args.figsize else args.figsize.split("x", 1))
         figsize = (float(w_str), float(h_str))
     except Exception:
-        figsize = (24.0, 10.0)
+        figsize = (24.0, 12.0)
 
     outfile = Path(args.outfile) if args.outfile else None
-    plot_bubbles_by_label(df, labels_map, win_lbl, outfile=outfile, dpi=args.dpi, figsize=figsize)
+    plot_bubbles_by_label(
+        df,
+        labels_map,
+        label_order,
+        win_lbl,
+        outfile=outfile,
+        dpi=args.dpi,
+        figsize=figsize,
+    )
 
 
 if __name__ == "__main__":
