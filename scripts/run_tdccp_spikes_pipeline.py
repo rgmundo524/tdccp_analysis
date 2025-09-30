@@ -66,10 +66,14 @@ def run(cmd: list[str], step: str, debug: bool) -> None:
 
 def ensure_figures(label_hint: str | None) -> None:
     FIG_DIR.mkdir(parents=True, exist_ok=True)
-    figs = list(FIG_DIR.glob("Volume_Price_*.png"))
-    if figs:
-        # at least one figure exists; done
-        return
+    patterns = (
+        "VolumeLines_Price_*_spikes.png",
+        "VolumeLines_Price_*.png",
+        "Volume_Price_*.png",
+    )
+    for pattern in patterns:
+        if any(FIG_DIR.glob(pattern)):
+            return
     # nothing found — fail with guidance
     hint = f" --start {label_hint[:8]} --end {label_hint[9:]}" if label_hint and len(label_hint) == 17 else ""
     sys.exit(
