@@ -2,14 +2,19 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
+import sys
 from pathlib import Path
 import numpy as np
 import pandas as pd
 
 BASE = Path(__file__).resolve().parent.parent
+SCRIPTS_DIR = Path(__file__).resolve().parent
+PY = sys.executable
 SWAPS_CSV = BASE / "data" / "swaps.csv"
 OUT_DIR   = BASE / "outputs" / "analysis"
 
+PRESSURE_SPIKES = SCRIPTS_DIR / "plot_tdccp_pressure_vs_price_spikes.py"
 TDCCP_SYMBOL = "TDCCP"
 TDCCP_MINT   = "Hg8bKz4mvs8KNj9zew1cEF9tDw1x2GViB4RFZjVEmfrD"
 
@@ -180,6 +185,29 @@ def main():
             print(f"[{bucket}] buckets={len(metrics)} spikes={len(sel_buckets)} "
                   f"addr_top={len(addr_top)} swaps={len(swaps_out)}")
             print(f"[write] {buckets_path.name}, {addr_path.name}, {swaps_path.name}")
+
+        if PRESSURE_SPIKES.exists():
+            plot_cmd = [
+                PY, str(PRESSURE_SPIKES),
+                "--bucket", bucket,
+                "--metrics", str(buckets_path),
+                "--min-delta-pct", str(args.min_delta_pct),
+            ]
+            if args.start:
+                plot_cmd += ["--start", args.start]
+            if args.end:
+                plot_cmd += ["--end", args.end]
+            if args.debug:
+                plot_cmd.append("--debug")
+            try:
+                subprocess.run(plot_cmd, check=True)
+            except subprocess.CalledProcessError as exc:
+                raise SystemExit(
+                    f"[error] plot_tdccp_pressure_vs_price_spikes failed (bucket={bucket}) → rc={exc.returncode}"
+                )
+        else:
+            if args.debug:
+                print(f"[warn] spike highlight script missing: {PRESSURE_SPIKES}")
 
 if __name__ == "__main__":
     main()
