@@ -286,6 +286,7 @@ def render_bubble_plot(
 
     fig.tight_layout(pad=0.6)
     fig.savefig(out, bbox_inches="tight", dpi=dpi)
+
     plt.close(fig)
     print(f"[done] {out}")
     return out
@@ -299,6 +300,7 @@ def plot_bubbles_by_label(
     outfile: Optional[Path] = None,
     dpi: int = 400,
     figsize: Tuple[float, float] = (24.0, 12.0),
+
 ) -> List[Path]:
     """
     Render address bubble plots with colors driven by settings labels.
