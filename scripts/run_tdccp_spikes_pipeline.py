@@ -66,10 +66,14 @@ def run(cmd: list[str], step: str, debug: bool) -> None:
 
 def ensure_figures(label_hint: str | None) -> None:
     FIG_DIR.mkdir(parents=True, exist_ok=True)
-    figs = list(FIG_DIR.glob("Volume_Price_*.png"))
-    if figs:
-        # at least one figure exists; done
-        return
+    patterns = (
+        "VolumeLines_Price_*_spikes.png",
+        "VolumeLines_Price_*.png",
+        "Volume_Price_*.png",
+    )
+    for pattern in patterns:
+        if any(FIG_DIR.glob(pattern)):
+            return
     # nothing found — fail with guidance
     hint = f" --start {label_hint[:8]} --end {label_hint[9:]}" if label_hint and len(label_hint) == 17 else ""
     sys.exit(
@@ -88,9 +92,30 @@ def main():
     )
     ap.add_argument("--start", help="UTC start (YYYY-mm-dd). Defaults to core:START in settings.csv")
     ap.add_argument("--end",   help="UTC end   (YYYY-mm-dd). Defaults to core:END   in settings.csv")
-    ap.add_argument("--buckets", default=None,
-                    help="Comma list (e.g. 1d,12h,6h,3h,1h,30min,10min). If omitted, each step uses its defaults.")
-    ap.add_argument("--min-delta-pct", type=float, default=25.0)
+    ap.add_argument(
+        "--buckets",
+        default=None,
+        help="Comma list (e.g. 1d,12h,6h,3h,1h,30min,10min). If omitted, each step uses its defaults.",
+    )
+    group = ap.add_mutually_exclusive_group()
+    group.add_argument(
+        "--min-delta-pct",
+        type=float,
+        default=None,
+        help=(
+            "Minimum sell-heavy delta_direct_pct required to treat a bucket as a spike. "
+            "Default 25 when --top-sell-count is not provided."
+        ),
+    )
+    group.add_argument(
+        "--top-sell-count",
+        type=int,
+        default=None,
+        help=(
+            "When provided, ignore --min-delta-pct and instead focus on the top N sell-heavy buckets "
+            "sorted by most-negative delta_direct."
+        ),
+    )
     ap.add_argument("--top-n", type=int, default=50)
     ap.add_argument("--routing-thresh", type=float, default=0.25)
     ap.add_argument("--debug", action="store_true")
@@ -102,15 +127,23 @@ def main():
     if not start or not end:
         sys.exit("[error] --start/--end not provided and START/END not found in settings.csv.")
 
+    use_top_sell = args.top_sell_count is not None
+    if use_top_sell and args.top_sell_count <= 0:
+        sys.exit("[error] --top-sell-count must be positive when supplied.")
+    min_delta = args.min_delta_pct if args.min_delta_pct is not None else 25.0
+
     # 1) analyze_spikes.py (no window-label; the script doesn’t accept it)
     analyze_cmd = [
         PY, str(ANALYZE),
         "--start", start,
         "--end", end,
-        "--min-delta-pct", str(args.min_delta_pct),
         "--top-n", str(args.top_n),
         "--routing-thresh", str(args.routing_thresh),
     ]
+    if use_top_sell:
+        analyze_cmd += ["--top-sell-count", str(args.top_sell_count)]
+    else:
+        analyze_cmd += ["--min-delta-pct", str(min_delta)]
     if args.buckets:
         analyze_cmd += ["--buckets", args.buckets]
     if args.debug:

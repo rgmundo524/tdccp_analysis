@@ -63,13 +63,14 @@ Human-maintained config file. Important rows:
 
 - `outputs/`
   - `figures/`
-    - `Volume_Price_<bucket>_<window>.png` – pressure vs. price charts.
+    - `VolumeLines_Price_<bucket>_<window>.png` – pressure vs. price charts.
+    - `VolumeLines_Price_<bucket>_<window>_spikes.png` – pressure vs. price with red-outlined spike buckets.
     - `Address_Bubbles_addresses_<window>.png` – bubble chart (by transaction count bins).
     - `Address_Bubbles_byLabel_<window>.png` – bubble chart (by label) with dynamic colors sourced from `settings.csv` address groups, plus `Address_Bubbles_byLabel_<window>_highlight_<group>.png` variants for each label active in the selected window.
   - `analysis/`
-    - `spike_buckets_<bucket>_<window>.csv`
-    - `spike_addresses_<bucket>_<window>.csv`
-    - `spike_swaps_<bucket>_<window>.csv`
+    - `spike_buckets_<bucket>_<mode>_<window>.csv`
+    - `spike_addresses_<bucket>_<mode>_<window>.csv`
+    - `spike_swaps_<bucket>_<mode>_<window>.csv`
 
 ---
 
@@ -79,4 +80,24 @@ Human-maintained config file. Important rows:
 Run:
 ```bash
 python scripts/run_tdccp_pipeline.py
+```
 
+### 2. Address transaction bubble chart
+Render a per-transaction bubble chart (with TDCCP price overlay) for a specific wallet:
+
+```bash
+python scripts/plot_tdccp_address_transactions_bubble.py --owner <FROM_ADDRESS>
+```
+
+The script automatically respects the `START`/`END` window from `settings.csv`, fetches the owner's TDCCP balance-change history from Solscan, classifies each transaction (buy, sell, transfer, or airdrop), writes a CSV summary to `data/addresses/`, and saves the bubble chart to `outputs/figures/`. The overlayed TDCCP price line is resampled to an hourly series for consistency with the balance-change cadence.
+
+### 3. Spike-highlight pressure vs. price plots
+Run the direct-flow spike scanner to emit analysis CSVs and spike-highlight pressure/price plots:
+
+```bash
+python scripts/analyze_spikes.py --start <YYYY-MM-DD> --end <YYYY-MM-DD>
+```
+
+For every requested bucket the script now invokes `plot_tdccp_pressure_vs_price_spikes.py`, which reuses the swaps window to draw the standard volume-vs-price lines and outlines sell-heavy spike buckets with red rectangles. Use either the default `--min-delta-pct` threshold or enable `--top-sell-count 5` to highlight the five most negative direct-flow buckets per chart. Sequential spike buckets are merged into a single red block so extended sell programs are easier to spot. Resulting figures are written alongside the base pressure/price plots in `outputs/figures/`.
+
+Spike analysis CSV filenames now include the selection mode so threshold-based runs do not overwrite top-seller exports. Expect filenames such as `spike_buckets_6h_mindelta25_20250301-20250505.csv` or `spike_addresses_1h_topsell5_20250301-20250505.csv`.
