@@ -487,6 +487,7 @@ def plot_transactions(
     else:
         tint_legend_text(ax.get_legend(), colors)
 
+
     fig.autofmt_xdate()
     outfile.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
