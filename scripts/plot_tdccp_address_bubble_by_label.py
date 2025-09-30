@@ -138,9 +138,11 @@ def compute_sizes(n: pd.Series) -> pd.Series:
     n = pd.to_numeric(n, errors="coerce").fillna(0).clip(lower=1)
     return np.sqrt(n) * 40.0
 
+
 def slugify_label(label: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9]+", "_", label.strip()).strip("_")
     return slug or "group"
+
 
 def build_vibrant_palette(count: int) -> List[str]:
     """Return a list of high-contrast, saturated colors for the given count."""
@@ -282,8 +284,9 @@ def render_bubble_plot(
         else:
             out = OUT_DIR / f"Address_Bubbles_byLabel{suffix}.png"
 
-    fig.tight_layout()
-    fig.savefig(out, bbox_inches="tight")
+    fig.tight_layout(pad=0.6)
+    fig.savefig(out, bbox_inches="tight", dpi=dpi)
+
     plt.close(fig)
     print(f"[done] {out}")
     return out
@@ -295,8 +298,9 @@ def plot_bubbles_by_label(
     label_order: List[str],
     window_label: Optional[str],
     outfile: Optional[Path] = None,
-    dpi: int = 150,
-    figsize: Tuple[float, float] = (24.0, 10.0),
+    dpi: int = 400,
+    figsize: Tuple[float, float] = (24.0, 12.0),
+
 ) -> List[Path]:
     """
     Render address bubble plots with colors driven by settings labels.
@@ -413,8 +417,8 @@ def main():
     ap.add_argument("--settings", default=str(SETTINGS), help="Path to settings.csv")
     ap.add_argument("--window-label", default=None, help="Text to append in the title (e.g., 20250301-20250505)")
     ap.add_argument("--outfile", default=None, help="Output PNG path (defaults to outputs/figures/Address_Bubbles_byLabel_*.png)")
-    ap.add_argument("--dpi", type=int, default=300, help="Figure DPI (default: 150)")
-    ap.add_argument("--figsize", default="40,20", help="Width,height in inches (default: 24,10)")
+    ap.add_argument("--dpi", type=int, default=400, help="Figure DPI (default: 400)")
+    ap.add_argument("--figsize", default="24,12", help="Figure size in inches (width,height)")
     # accepted but ignored—keeps pipeline compatibility without altering output
     ap.add_argument("--top-labels", type=int, default=0, help="(ignored) kept only for pipeline compatibility")
 
@@ -441,7 +445,7 @@ def main():
         w_str, h_str = (args.figsize.split(",", 1) if "," in args.figsize else args.figsize.split("x", 1))
         figsize = (float(w_str), float(h_str))
     except Exception:
-        figsize = (24.0, 10.0)
+        figsize = (24.0, 12.0)
 
     outfile = Path(args.outfile) if args.outfile else None
     plot_bubbles_by_label(

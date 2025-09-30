@@ -3,19 +3,23 @@ from __future__ import annotations
 
 import argparse
 import sys
-import pandas as pd
+from pathlib import Path
+from typing import Dict, List, Tuple
+
 import matplotlib.pyplot as plt
 import numpy as np
-from pathlib import Path
-from matplotlib.ticker import FuncFormatter, LogLocator
+import pandas as pd
+from matplotlib.lines import Line2D
+from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
 
-# ---------- project defaults ----------
+
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_METRICS = ROOT / "data" / "addresses" / "tdccp_address_metrics.csv"
+DATA_DIR = ROOT / "data"
+DEFAULT_METRICS = DATA_DIR / "addresses" / "tdccp_address_metrics.csv"
 OUT_DIR = ROOT / "outputs" / "figures"
-# --------------------------------------
 
 
+# ----------------------------- helpers ---------------------------------
 def load_metrics(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path)
     need = {"from_address", "net_ui", "peak_balance_ui", "direct_txn_count"}
@@ -25,132 +29,183 @@ def load_metrics(path: Path) -> pd.DataFrame:
     return df
 
 
-def bucket_color(tx_count: int) -> str:
-    """Map tx count into a distinct categorical color group."""
-    if tx_count == 1: return "tab:blue"
-    if 2 <= tx_count <= 10: return "tab:orange"
-    if 11 <= tx_count <= 50: return "tab:green"
-    if 51 <= tx_count <= 100: return "tab:red"
-    if 101 <= tx_count <= 500: return "tab:purple"
-    if 501 <= tx_count <= 1000: return "tab:brown"
-    return "tab:pink"  # 1000+
+def fmt_y_plain(v, pos):
+    try:
+        iv = int(v)
+        if abs(v - iv) < 1e-9:
+            return f"{iv:,}"
+        return f"{v:,.2f}"
+    except Exception:
+        return str(v)
 
 
-def bucket_label(tx_count: int) -> str:
-    if tx_count == 1: return "1"
-    if 2 <= tx_count <= 10: return "2–10"
-    if 11 <= tx_count <= 50: return "11–50"
-    if 51 <= tx_count <= 100: return "51–100"
-    if 101 <= tx_count <= 500: return "101–500"
-    if 501 <= tx_count <= 1000: return "501–1000"
-    return "1000+"
+def fmt_x_decades(v, pos):
+    if v <= 0:
+        return ""
+    p = int(round(np.log10(v)))
+    val = 10 ** p
+    if abs(v - val) > 1e-9:
+        return ""
+    if val < 1_000:
+        return f"{int(val)}"
+    if val < 1_000_000:
+        return f"{int(val/1_000)}k"
+    if val < 1_000_000_000:
+        return f"{int(val/1_000_000)}M"
+    return f"{int(val/1_000_000_000)}B"
 
 
+def compute_sizes(n: pd.Series) -> pd.Series:
+    n = pd.to_numeric(n, errors="coerce").fillna(0).clip(lower=1)
+    return np.sqrt(n) * 40.0
+
+
+def bucket_definitions() -> List[Tuple[str, int, int, str]]:
+    return [
+        ("1", 1, 1, "#1f77b4"),
+        ("2–10", 2, 10, "#ff7f0e"),
+        ("11–50", 11, 50, "#2ca02c"),
+        ("51–100", 51, 100, "#d62728"),
+        ("101–500", 101, 500, "#9467bd"),
+        ("501–1000", 501, 1000, "#8c564b"),
+        ("1000+", 1001, np.inf, "#17becf"),
+    ]
+
+
+def assign_buckets(tx_counts: pd.Series) -> Tuple[pd.Series, pd.Series]:
+    buckets = bucket_definitions()
+    labels: List[str] = []
+    colors: List[str] = []
+    for count in tx_counts.to_numpy():
+        label = "1000+"
+        color = "#17becf"
+        for name, start, end, hex_color in buckets:
+            if start <= count <= end:
+                label = name
+                color = hex_color
+                break
+        labels.append(label)
+        colors.append(color)
+    return pd.Series(labels, index=tx_counts.index), pd.Series(colors, index=tx_counts.index)
+
+
+def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    sub = df.copy()
+    sub = sub[sub["peak_balance_ui"] > 0]
+    sub = sub[sub["direct_txn_count"].fillna(0) > 0]
+    if "percent_intermediary" in sub.columns:
+        sub = sub[sub["percent_intermediary"].fillna(0) == 0]
+    if sub.empty:
+        raise SystemExit("[error] no rows to plot after filtering (peak>0, direct>0, !intermediary).")
+    return sub
+
+
+# ----------------------------- plotting --------------------------------
 def plot_bubbles(
     df: pd.DataFrame,
-    top_labels: int,
     window_label: str | None,
     outfile: Path,
-    figsize: tuple[float, float],
+    figsize: Tuple[float, float],
     dpi: int,
-):
-    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+) -> None:
+    sub = prepare_dataframe(df)
+    sizes = compute_sizes(sub["direct_txn_count"])
+    label_groups, colors = assign_buckets(sub["direct_txn_count"].astype(int))
 
-    # Assign color groups and sizes
-    df["color"] = df["direct_txn_count"].apply(bucket_color)
-    df["label_group"] = df["direct_txn_count"].apply(bucket_label)
-    # Bubble size ~ sqrt(tx_count) so that area ~ tx_count
-    df["size"] = np.sqrt(df["direct_txn_count"].clip(lower=1)) * 40
+    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    ax.set_facecolor("white")
 
     ax.scatter(
-        df["peak_balance_ui"],
-        df["net_ui"],
-        s=df["size"],
-        c=df["color"],
+        sub["peak_balance_ui"],
+        sub["net_ui"],
+        s=sizes.to_numpy(),
+        color=colors.to_numpy(),
         alpha=0.6,
-        edgecolor="k",
-        linewidth=0.5,
+        edgecolors="black",
+        linewidths=0.5,
     )
 
-    # # Label top N by |net|
-    # if top_labels > 0:
-    #     top = df.reindex(df["net_ui"].abs().sort_values(ascending=False).index).head(top_labels)
-    #     for _, row in top.iterrows():
-    #         ax.text(row["peak_balance_ui"], row["net_ui"], row["from_address"][:6], fontsize=8)
+    ax.set_xscale("log", base=10)
+    ax.xaxis.set_major_locator(LogLocator(base=10))
+    ax.xaxis.set_major_formatter(FuncFormatter(fmt_x_decades))
+    ax.xaxis.set_minor_locator(LogLocator(base=10, subs=tuple(np.arange(2, 10) * 0.1)))
+    ax.xaxis.set_minor_formatter(NullFormatter())
 
-    # ----- X axis: clean log ticks -----
-    ax.set_xscale("log")
-    xmax = max(1.0, float(df["peak_balance_ui"].max()))
-    ax.set_xlim(left=1, right=xmax * 1.2)
+    max_x = sub["peak_balance_ui"].max()
+    right = 10 ** np.ceil(np.log10(max(1.0, max_x)))
+    ax.set_xlim(left=1.0, right=right)
 
-    def fmt_x(v, pos):
-        if v >= 1e9: return f"{int(v/1e9)}B"
-        if v >= 1e6: return f"{int(v/1e6)}M"
-        if v >= 1e3: return f"{int(v/1e3)}k"
-        return str(int(v))
-    ax.xaxis.set_major_formatter(FuncFormatter(fmt_x))
-    
-    # 10% minor ticks between decades: 2…9
-    # ax.xaxis.set_minor_locator(LogLocator(base=10.0, subs=np.linspace(1.111, 9, 8)/10, numticks=10))
-    # ax.xaxis.set_minor_locator(LogLocator(base=10, subs=np.arange(2, 10), numticks=100))
-    # ax.xaxis.set_minor_locator(LogLocator(base=10, subs=np.arange(2, 10) * 0.1, numticks=100))
-    # ax.xaxis.set_minor_locator(MultipleLocator( (ax.get_xticks()[1] - ax.get_xticks()[0]) / 9 ))
+    ax.set_yscale("symlog", base=10, linthresh=1.0, linscale=1.0)
+    ax.yaxis.set_major_formatter(FuncFormatter(fmt_y_plain))
+    ax.axhline(0, color="#606060", linewidth=1.0, alpha=0.8, zorder=0)
 
-    ax.set_xlabel("Peak Balance (TDCCP)")
-    ax.grid(True, which="major", linestyle="--", alpha=0.6)
-    # ax.grid(True, which="minor", linestyle=":",alpha=0.3)
+    ax.grid(True, which="major", linestyle="--", alpha=0.35)
+    ax.grid(True, which="minor", axis="x", linestyle=":", alpha=0.2)
 
-    # ----- Y axis: plain-number symlog -----
-    ax.set_yscale("symlog", linthresh=1)
+    ax.set_xlabel("Peak Balance (TDCCP)", fontsize=16)
+    ax.set_ylabel("Net Volume (TDCCP)", fontsize=16)
+    ax.tick_params(axis="both", labelsize=13)
 
-    def fmt_y(v, pos):
-        return f"{v:,.0f}"
-    ax.yaxis.set_major_formatter(FuncFormatter(fmt_y))
-    ax.set_ylabel("Net Volume (TDCCP)")
+    legend_handles: List[Line2D] = []
+    legend_labels: List[str] = []
+    bucket_colors: Dict[str, str] = {name: color for name, _, _, color in bucket_definitions()}
+    for label in [lab for lab in bucket_colors if (label_groups == lab).any()]:
+        color = bucket_colors[label]
+        proxy = Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="white",
+            markerfacecolor=color,
+            markeredgecolor="black",
+            markeredgewidth=0.5,
+            markersize=10,
+        )
+        legend_handles.append(proxy)
+        legend_labels.append(label)
 
-    # ----- Legend: color = txn count bucket (sizes remain continuous) -----
-    handles = []
-    labels = []
-    for grp in ["1", "2–10", "11–50", "51–100", "101–500", "501–1000", "1000+"]:
-        sub = df[df["label_group"] == grp]
-        if sub.empty:
-            continue
-        h = ax.scatter([], [], c=sub["color"].iloc[0], s=100, alpha=0.6, edgecolor="k")
-        handles.append(h)
-        labels.append(grp)
-    if handles:
-        ax.legend(handles, labels, title="Direct swaps (color buckets)", loc="upper left")
+    if legend_handles:
+        ax.legend(
+            legend_handles,
+            legend_labels,
+            title="Direct swaps (color buckets)",
+            loc="upper left",
+            frameon=True,
+            framealpha=0.9,
+            fontsize=12,
+            title_fontsize=13,
+        )
 
-    # Title & save
     title = "Address Bubbles — TDCCP"
     if window_label:
         title += f" — {window_label}"
-    ax.set_title(title)
+    ax.set_title(title, pad=16, fontsize=20)
 
     outfile.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(outfile, bbox_inches="tight")
+    fig.tight_layout(pad=0.6)
+    fig.savefig(outfile, bbox_inches="tight", dpi=dpi)
     plt.close(fig)
     print(f"[done] {outfile}")
 
 
-def parse_figsize(s: str) -> tuple[float, float]:
+def parse_figsize(s: str) -> Tuple[float, float]:
     try:
-        w, h = (x.strip() for x in s.split(","))
-        return float(w), float(h)
-    except Exception:
-        raise SystemExit("[error] --figsize must be in the form 'W,H' (e.g. 18,12)")
+        w_str, h_str = (s.split(",", 1) if "," in s else s.split("x", 1))
+        return float(w_str), float(h_str)
+    except Exception as exc:
+        raise SystemExit("[error] --figsize must be 'width,height' (e.g. 24,12)") from exc
 
 
 def main():
     ap = argparse.ArgumentParser(description="Bubble chart of addresses by TDCCP net vs peak balance.")
     ap.add_argument("--metrics", default=str(DEFAULT_METRICS), help="Path to metrics CSV")
-    ap.add_argument("--top-labels", type=int, default=20, help="Annotate top-N by |net| (default=20)")
-    ap.add_argument("--min-peak", type=float, default=0.0, help="(reserved) min peak filter")
-    ap.add_argument("--min-direct", type=int, default=0, help="(reserved) min direct txns filter")
-    ap.add_argument("--figsize", type=str, default="40,20", help="Width,height in inches (default=30,20)")
-    ap.add_argument("--dpi", type=int, default=300, help="Figure DPI (default=300)")
+    ap.add_argument("--figsize", type=str, default="24,12", help="Figure size in inches (width,height)")
+    ap.add_argument("--dpi", type=int, default=400, help="Figure DPI (default: 400)")
     ap.add_argument("--outfile", type=str, help="Output path (PNG)")
     ap.add_argument("--window-label", type=str, help="Optional label for chart title & filename")
+    ap.add_argument("--top-labels", type=int, default=0, help="(ignored) kept for pipeline compatibility")
+    ap.add_argument("--min-peak", type=float, default=0.0, help="(ignored) maintained for compatibility")
+    ap.add_argument("--min-direct", type=int, default=0, help="(ignored) maintained for compatibility")
     args = ap.parse_args()
 
     metrics = Path(args.metrics)
@@ -158,19 +213,16 @@ def main():
         sys.exit(f"[error] metrics not found: {metrics}")
 
     df = load_metrics(metrics)
-
-    # Parse size & dpi
     figsize = parse_figsize(args.figsize)
     dpi = int(args.dpi)
 
-    # Output file
     if args.outfile:
         outfile = Path(args.outfile)
     else:
         tag = args.window_label or "all"
         outfile = OUT_DIR / f"Address_Bubbles_addresses_{tag}.png"
 
-    plot_bubbles(df, args.top_labels, args.window_label, outfile, figsize, dpi)
+    plot_bubbles(df, args.window_label, outfile, figsize, dpi)
 
 
 if __name__ == "__main__":
