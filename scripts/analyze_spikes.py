@@ -186,15 +186,29 @@ def main():
         # pick spike buckets either by threshold or top-N sell deltas
         if args.top_sell_count > 0:
             sellers = metrics[metrics["delta_direct"] < 0].copy()
-            sellers = sellers.sort_values(
-                ["delta_direct", "sell_direct", "bucket"], ascending=[True, False, True]
+            sellers = (
+                sellers.reset_index(drop=False)
+                .rename(columns={"index": "bucket"})
+                .sort_values(
+                    ["delta_direct", "sell_direct", "bucket"],
+                    ascending=[True, False, True],
+                )
             )
             sel = sellers.head(args.top_sell_count)
         else:
             sell_thresh = abs(args.min_delta_pct)
             sel = metrics[metrics["delta_direct_pct"] <= -sell_thresh].copy()
-        sel_buckets = list(sel.index)
+        if args.top_sell_count > 0:
+            sel_buckets = list(sel["bucket"])
+        else:
+            sel_buckets = list(sel.index)
         metrics_out = metrics.assign(selected_spike=metrics.index.isin(sel_buckets))
+
+        # write bucket metrics (includes direct & all + routing_heavy_bucket)
+        buckets_path = OUT_DIR / f"spike_buckets_{bucket}_{daterange}.csv"
+        metrics_out.reset_index(drop=False).rename(columns={"index":"bucket"}).to_csv(
+            buckets_path, index=False
+        )
 
         # write bucket metrics (includes direct & all + routing_heavy_bucket)
         buckets_path = OUT_DIR / f"spike_buckets_{bucket}_{daterange}.csv"

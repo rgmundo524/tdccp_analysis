@@ -99,4 +99,3 @@ python scripts/analyze_spikes.py --start <YYYY-MM-DD> --end <YYYY-MM-DD>
 ```
 
 For every requested bucket the script now invokes `plot_tdccp_pressure_vs_price_spikes.py`, which reuses the swaps window to draw the standard volume-vs-price lines and outlines sell-heavy spike buckets with red rectangles. Use either the default `--min-delta-pct` threshold or enable `--top-sell-count 5` to highlight the five most negative direct-flow buckets per chart. Sequential spike buckets are merged into a single red block so extended sell programs are easier to spot. Resulting figures are written alongside the base pressure/price plots in `outputs/figures/`.
-
