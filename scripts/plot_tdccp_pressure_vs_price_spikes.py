@@ -25,6 +25,18 @@ DATA = ROOT / "data"
 FIG_DIR = ROOT / "outputs" / "figures"
 
 
+def _infer_mode_tag(metrics_path: Path, bucket: str) -> Optional[str]:
+    """Best-effort extraction of the mode tag from the metrics filename."""
+    stem = metrics_path.stem
+    prefix = f"spike_buckets_{bucket}_"
+    if stem.startswith(prefix):
+        remainder = stem[len(prefix) :]
+        head, sep, _ = remainder.rpartition("_")
+        if sep:
+            return head or None
+    return None
+
+
 def _load_price_history(price_path: Path, debug: bool = False) -> Optional[pd.DataFrame]:
     if not price_path.exists():
         if debug:
@@ -167,6 +179,7 @@ def _plot_bucket_with_spikes(
     flows: pd.DataFrame,
     price: Optional[pd.DataFrame],
     label: str,
+    mode_tag: Optional[str],
     outfile_dir: Path,
     spike_windows: Iterable[tuple[pd.Timestamp, pd.Timestamp]],
     debug: bool = False,
@@ -205,7 +218,11 @@ def _plot_bucket_with_spikes(
         color="blue",
     )
 
-    ax.set_title(f"TDCCP Volume vs Price • Spikes Highlight • {bucket} • {label}")
+    title_bits = ["TDCCP Volume vs Price", "Spikes Highlight", bucket]
+    if mode_tag:
+        title_bits.append(mode_tag)
+    title_bits.append(label)
+    ax.set_title(" • ".join(title_bits))
     ax.set_ylabel("Volume (TDCCP units)")
     ax.yaxis.set_major_formatter(FuncFormatter(format_ytick_plain))
     ax.grid(True, axis="both", linestyle="--", alpha=0.5)
@@ -252,7 +269,11 @@ def _plot_bucket_with_spikes(
 
     fig.autofmt_xdate()
     outfile_dir.mkdir(parents=True, exist_ok=True)
-    out = outfile_dir / f"VolumeLines_Price_{bucket}_{label}_spikes.png"
+    filename_parts = ["VolumeLines_Price", bucket]
+    if mode_tag:
+        filename_parts.append(mode_tag)
+    filename_parts.append(label)
+    out = outfile_dir / ("_".join(filename_parts) + "_spikes.png")
     fig.tight_layout()
     fig.savefig(out)
     plt.close(fig)
@@ -269,6 +290,13 @@ def main() -> None:
     )
     ap.add_argument("--bucket", required=True, help="Resample bucket size (e.g. 1d,12h,3h,1h,30min)")
     ap.add_argument("--metrics", required=True, help="Path to spike metrics CSV for the bucket")
+    ap.add_argument(
+        "--mode-tag",
+        help=(
+            "Optional label describing the spike-selection mode. If omitted, the script attempts "
+            "to infer it from the metrics filename."
+        ),
+    )
     ap.add_argument(
         "--min-delta-pct",
         type=float,
@@ -335,13 +363,18 @@ def main() -> None:
         debug=args.debug,
     )
 
+    mode_tag = args.mode_tag or _infer_mode_tag(Path(args.metrics), args.bucket)
+    if args.debug and mode_tag:
+        print(f"[spikes] mode tag: {mode_tag}")
+
     out = _plot_bucket_with_spikes(
-        args.bucket,
-        flows,
-        price_df,
-        label,
-        Path(args.outfile_dir),
-        spikes,
+        bucket=args.bucket,
+        flows=flows,
+        price=price_df,
+        label=label,
+        mode_tag=mode_tag,
+        outfile_dir=Path(args.outfile_dir),
+        spike_windows=spikes,
         debug=args.debug,
     )
     if not out or not out.exists():

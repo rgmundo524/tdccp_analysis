@@ -253,6 +253,7 @@ def main():
                 PY, str(PRESSURE_SPIKES),
                 "--bucket", bucket,
                 "--metrics", str(buckets_path),
+                "--mode-tag", mode_tag,
             ]
             if args.top_sell_count > 0:
                 plot_cmd += ["--top-sell-count", str(args.top_sell_count)]
