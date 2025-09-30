@@ -11,6 +11,7 @@ DEFAULT_METRICS = ROOT / "data" / "addresses" / "tdccp_address_metrics.csv"
 BUILDER = ROOT / "scripts" / "build_bubble_pipeline.py"
 PLOT_A  = ROOT / "scripts" / "plot_tdccp_address_bubble.py"
 PLOT_B  = ROOT / "scripts" / "plot_tdccp_address_bubble_by_label.py"
+PLOT_C  = ROOT / "scripts" / "plot_tdccp_address_bubble_with_spikes.py"
 
 def read_settings_value(key_name: str) -> str | None:
     if not SETTINGS.exists():
@@ -52,9 +53,15 @@ def main():
                     help=f"Path for tdccp_address_metrics.csv (default: {DEFAULT_METRICS})")
     ap.add_argument("--top-labels", type=int, default=20, help="How many top points to annotate (default: 20)")
     ap.add_argument("--debug", action="store_true")
+    ap.add_argument("--spike-addresses", dest="spike_addresses", default=None,
+                    help="Optional CSV of spike addresses to highlight in a third render")
     args = ap.parse_args()
 
     metrics_path = Path(args.metrics)
+    spike_path = Path(args.spike_addresses) if args.spike_addresses else None
+
+    if spike_path and not spike_path.exists():
+        sys.exit(f"[error] spike CSV not found: {spike_path}")
 
     # 1) Build metrics if missing
     if not metrics_path.exists():
@@ -72,7 +79,15 @@ def main():
     if label: plotB += ["--window-label", label]
     run(plotB, step="plot labeled address bubble")
 
-    print("[pipeline] bubble charts complete.")
+    if spike_path:
+        plotC = [PY, str(PLOT_C), "--metrics", str(metrics_path), "--spike-addresses", str(spike_path)]
+        if label: plotC += ["--window-label", label]
+        run(plotC, step="plot spike-highlight bubble")
+
+    if spike_path:
+        print("[pipeline] bubble charts plus spike-highlight render complete.")
+    else:
+        print("[pipeline] bubble charts complete.")
 
 if __name__ == "__main__":
     main()
