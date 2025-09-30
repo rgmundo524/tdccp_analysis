@@ -65,7 +65,7 @@ Human-maintained config file. Important rows:
   - `figures/`
     - `Volume_Price_<bucket>_<window>.png` – pressure vs. price charts.
     - `Address_Bubbles_addresses_<window>.png` – bubble chart (by transaction count bins).
-    - `Address_Bubbles_by_label_<window>.png` – bubble chart (by label) with dynamic colors sourced from `settings.csv` address groups.
+    - `Address_Bubbles_byLabel_<window>.png` – bubble chart (by label) with dynamic colors sourced from `settings.csv` address groups, plus `Address_Bubbles_byLabel_<window>_highlight_<group>.png` variants for each label active in the selected window.
   - `analysis/`
     - `spike_buckets_<bucket>_<window>.csv`
     - `spike_addresses_<bucket>_<window>.csv`
