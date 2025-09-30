@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -44,6 +45,18 @@ def load_swaps(start: str|None, end: str|None) -> pd.DataFrame:
     df = df.loc[involved].copy()
     if df.empty: raise SystemExit("No TDCCP-involving swaps in the selected time window.")
     return df
+
+
+def _sanitize_float_for_tag(value: float) -> str:
+    """Return a filesystem-friendly representation of a float."""
+    try:
+        dec = Decimal(str(value)).normalize()
+    except InvalidOperation:
+        dec = Decimal(value)
+    as_str = format(dec, "f").rstrip("0").rstrip(".")
+    if not as_str:
+        as_str = "0"
+    return as_str.replace("-", "neg").replace(".", "p")
 
 def compute_volumes(df: pd.DataFrame, bucket: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return (vol_direct, vol_all) indexed by bucket with buy/sell."""
@@ -195,9 +208,11 @@ def main():
                 )
             )
             sel = sellers.head(args.top_sell_count)
+            mode_tag = f"topsell{args.top_sell_count}"
         else:
             sell_thresh = abs(args.min_delta_pct)
             sel = metrics[metrics["delta_direct_pct"] <= -sell_thresh].copy()
+            mode_tag = f"mindelta{_sanitize_float_for_tag(sell_thresh)}"
         if args.top_sell_count > 0:
             sel_buckets = list(sel["bucket"])
         else:
@@ -205,7 +220,7 @@ def main():
         metrics_out = metrics.assign(selected_spike=metrics.index.isin(sel_buckets))
 
         # write bucket metrics (includes direct & all + routing_heavy_bucket)
-        buckets_path = OUT_DIR / f"spike_buckets_{bucket}_{daterange}.csv"
+        buckets_path = OUT_DIR / f"spike_buckets_{bucket}_{mode_tag}_{daterange}.csv"
         metrics_out.reset_index(drop=False).rename(columns={"index":"bucket"}).to_csv(
             buckets_path, index=False
         )
@@ -217,8 +232,8 @@ def main():
         )
         # addresses & raw swaps for the selected buckets
         addr_top, swaps_out = top_addresses_for_buckets(df, bucket, sel_buckets, args.top_n)
-        addr_path  = OUT_DIR / f"spike_addresses_{bucket}_{daterange}.csv"
-        swaps_path = OUT_DIR / f"spike_swaps_{bucket}_{daterange}.csv"
+        addr_path  = OUT_DIR / f"spike_addresses_{bucket}_{mode_tag}_{daterange}.csv"
+        swaps_path = OUT_DIR / f"spike_swaps_{bucket}_{mode_tag}_{daterange}.csv"
         addr_top.to_csv(addr_path, index=False)
         swaps_out.to_csv(swaps_path, index=False)
 
