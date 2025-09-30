@@ -179,6 +179,7 @@ def plot_bubbles_by_label(
 
     # Labels from settings
     label_series = sub["from_address"].map(addr_labels).fillna("Other")
+# <<<<<<< codex/summarize-current-project-state-d6roy5
 
     # Determine display order: 'Other' (if present in data), then each
     # settings-defined label in file order, then any additional labels that
@@ -202,6 +203,28 @@ def plot_bubbles_by_label(
         cmap = plt.colormaps.get_cmap("tab20", len(label_order))
         for idx, lab in enumerate(label_order):
             color_map[lab] = mcolors.to_hex(cmap(idx))
+# =======
+# #     labels_present = list(label_series.unique())
+
+# #     # A compact, readable palette—one color per label, 'Other' as light gray
+# #     base_colors = [
+# #         "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
+# #         "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
+# #         "#bcbd22", "#17becf",
+# #     ]
+# #     color_map: Dict[str, str] = {}
+# #     # Put 'Other' first and gray it
+# #     if "Other" in labels_present:
+# #         color_map["Other"] = "#D3D3D3"
+# #         labels_present = ["Other"] + [l for l in labels_present if l != "Other"]
+# #     # Assign the rest
+# #     color_idx = 0
+# #     for lab in labels_present:
+# #         if lab == "Other":
+# #             continue
+# #         color_map[lab] = base_colors[color_idx % len(base_colors)]
+# #         color_idx += 1
+# >>>>>>> master
 
     # Figure
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
@@ -233,6 +256,7 @@ def plot_bubbles_by_label(
     legend_labels: List[str] = []
     for lab in display_labels:
         mask = (label_series == lab)
+# <<<<<<< codex/summarize-current-project-state-d6roy5
         color = color_map.get(lab, "#D3D3D3")
         if mask.any():
             scatter = ax.scatter(
@@ -260,6 +284,20 @@ def plot_bubbles_by_label(
             )
             legend_handles.append(proxy)
             legend_labels.append(lab)
+# =======
+#         if not mask.any():
+#             continue
+#         ax.scatter(
+#             sub.loc[mask, "peak_balance_ui"],
+#             sub.loc[mask, "net_ui"],
+#             s=sizes.loc[mask].to_numpy(),
+#             color=color_map.get(lab, "#D3D3D3"),
+#             alpha=0.6,
+#             edgecolors="black",
+#             linewidths=0.5,
+#             label=lab,
+#         )
+# >>>>>>> master
 
     # Titles & labels (same positions/wording as base)
     title = "Address Bubbles — TDCCP"
