@@ -4,12 +4,14 @@ from __future__ import annotations
 import argparse
 import csv
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.ticker import LogLocator, NullFormatter, FuncFormatter
+from matplotlib.lines import Line2D
+from matplotlib import colors as mcolors
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
@@ -19,16 +21,18 @@ OUT_DIR = ROOT / "outputs" / "figures"
 
 
 # ----------------------------- helpers ---------------------------------
-def read_settings_labels(settings_csv: Path) -> Dict[str, str]:
+def read_settings_labels(settings_csv: Path) -> Tuple[Dict[str, str], List[str]]:
     """
     Read address labels from settings.csv into {from_address: label}.
     Expects rows where Category (first column) == 'address', Key is the
     address, and Value is the label.
     """
     if not settings_csv.exists():
-        return {}
+        return {}, []
 
     addr_map: Dict[str, str] = {}
+    ordered_labels: List[str] = []
+    seen_labels: set[str] = set()
     key_idx, val_idx, cat_idx = 1, 2, 0
 
     with settings_csv.open("r", encoding="utf-8") as f:
@@ -51,8 +55,11 @@ def read_settings_labels(settings_csv: Path) -> Dict[str, str]:
             label = (row[val_idx] or "").strip()
             if addr and label:
                 addr_map[addr] = label
+                if label not in seen_labels:
+                    ordered_labels.append(label)
+                    seen_labels.add(label)
 
-    return addr_map
+    return addr_map, ordered_labels
 
 
 def human_range_label(start: Optional[str], end: Optional[str]) -> Optional[str]:
@@ -133,6 +140,7 @@ def compute_sizes(n: pd.Series) -> pd.Series:
 def plot_bubbles_by_label(
     df: pd.DataFrame,
     addr_labels: Dict[str, str],
+    label_order: List[str],
     window_label: Optional[str],
     outfile: Optional[Path] = None,
     dpi: int = 150,
@@ -141,6 +149,9 @@ def plot_bubbles_by_label(
     """
     Render address bubble plot with colors driven by settings labels.
     Keeps axes, sizing, grid, and legend placement identical to the base chart.
+    ``label_order`` should be the ordered unique label list pulled from
+    settings.csv so that colors/legend entries remain stable as categories
+    expand.
     """
 
     # Expected columns from metrics:
@@ -168,26 +179,52 @@ def plot_bubbles_by_label(
 
     # Labels from settings
     label_series = sub["from_address"].map(addr_labels).fillna("Other")
-    labels_present = list(label_series.unique())
+# <<<<<<< codex/summarize-current-project-state-d6roy5
 
-    # A compact, readable palette—one color per label, 'Other' as light gray
-    base_colors = [
-        "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
-        "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
-        "#bcbd22", "#17becf",
-    ]
-    color_map: Dict[str, str] = {}
-    # Put 'Other' first and gray it
-    if "Other" in labels_present:
-        color_map["Other"] = "#D3D3D3"
-        labels_present = ["Other"] + [l for l in labels_present if l != "Other"]
-    # Assign the rest
-    color_idx = 0
-    for lab in labels_present:
-        if lab == "Other":
-            continue
-        color_map[lab] = base_colors[color_idx % len(base_colors)]
-        color_idx += 1
+    # Determine display order: 'Other' (if present in data), then each
+    # settings-defined label in file order, then any additional labels that
+    # slipped through (unlikely but keeps things robust).
+    display_labels: List[str] = []
+    if (label_series == "Other").any():
+        display_labels.append("Other")
+    for lab in label_order:
+        if lab not in display_labels:
+            display_labels.append(lab)
+    for lab in label_series.unique():
+        if lab not in display_labels:
+            display_labels.append(lab)
+
+    # Build a dynamic palette: 'Other' stays light gray, address-label colors
+    # draw from a tab20 colormap sized to the number of unique labels defined in
+    # settings.csv.  This ensures we can grow beyond the handful of original
+    # groups without hard-coding specific hues.
+    color_map: Dict[str, str] = {"Other": "#D3D3D3"}
+    if label_order:
+        cmap = plt.colormaps.get_cmap("tab20", len(label_order))
+        for idx, lab in enumerate(label_order):
+            color_map[lab] = mcolors.to_hex(cmap(idx))
+# =======
+# #     labels_present = list(label_series.unique())
+
+# #     # A compact, readable palette—one color per label, 'Other' as light gray
+# #     base_colors = [
+# #         "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
+# #         "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
+# #         "#bcbd22", "#17becf",
+# #     ]
+# #     color_map: Dict[str, str] = {}
+# #     # Put 'Other' first and gray it
+# #     if "Other" in labels_present:
+# #         color_map["Other"] = "#D3D3D3"
+# #         labels_present = ["Other"] + [l for l in labels_present if l != "Other"]
+# #     # Assign the rest
+# #     color_idx = 0
+# #     for lab in labels_present:
+# #         if lab == "Other":
+# #             continue
+# #         color_map[lab] = base_colors[color_idx % len(base_colors)]
+# #         color_idx += 1
+# >>>>>>> master
 
     # Figure
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
@@ -215,20 +252,52 @@ def plot_bubbles_by_label(
     ax.grid(True, which="minor", axis="x", linestyle=":", alpha=0.2)
 
     # Scatter by label (only color has changed vs base)
-    for lab in labels_present:
+    legend_handles: List = []
+    legend_labels: List[str] = []
+    for lab in display_labels:
         mask = (label_series == lab)
-        if not mask.any():
-            continue
-        ax.scatter(
-            sub.loc[mask, "peak_balance_ui"],
-            sub.loc[mask, "net_ui"],
-            s=sizes.loc[mask].to_numpy(),
-            color=color_map.get(lab, "#D3D3D3"),
-            alpha=0.6,
-            edgecolors="black",
-            linewidths=0.5,
-            label=lab,
-        )
+# <<<<<<< codex/summarize-current-project-state-d6roy5
+        color = color_map.get(lab, "#D3D3D3")
+        if mask.any():
+            scatter = ax.scatter(
+                sub.loc[mask, "peak_balance_ui"],
+                sub.loc[mask, "net_ui"],
+                s=sizes.loc[mask].to_numpy(),
+                color=color,
+                alpha=0.6,
+                edgecolors="black",
+                linewidths=0.5,
+                label=lab,
+            )
+            legend_handles.append(scatter)
+            legend_labels.append(lab)
+        else:
+            proxy = Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="white",
+                markerfacecolor=color,
+                markeredgecolor="black",
+                markeredgewidth=0.5,
+                markersize=10,
+            )
+            legend_handles.append(proxy)
+            legend_labels.append(lab)
+# =======
+#         if not mask.any():
+#             continue
+#         ax.scatter(
+#             sub.loc[mask, "peak_balance_ui"],
+#             sub.loc[mask, "net_ui"],
+#             s=sizes.loc[mask].to_numpy(),
+#             color=color_map.get(lab, "#D3D3D3"),
+#             alpha=0.6,
+#             edgecolors="black",
+#             linewidths=0.5,
+#             label=lab,
+#         )
+# >>>>>>> master
 
     # Titles & labels (same positions/wording as base)
     title = "Address Bubbles — TDCCP"
@@ -241,6 +310,8 @@ def plot_bubbles_by_label(
 
     # Legend: keep in the same upper-left spot
     lgd = ax.legend(
+        legend_handles,
+        legend_labels,
         title="Address labels (settings.csv)",
         loc="upper left",
         frameon=True,
@@ -285,7 +356,7 @@ def main():
     df = pd.read_csv(metrics_path)
 
     # load labels
-    labels_map = read_settings_labels(Path(args.settings))
+    labels_map, label_order = read_settings_labels(Path(args.settings))
 
     # window label
     win_lbl = args.window_label
@@ -301,7 +372,15 @@ def main():
         figsize = (24.0, 10.0)
 
     outfile = Path(args.outfile) if args.outfile else None
-    plot_bubbles_by_label(df, labels_map, win_lbl, outfile=outfile, dpi=args.dpi, figsize=figsize)
+    plot_bubbles_by_label(
+        df,
+        labels_map,
+        label_order,
+        win_lbl,
+        outfile=outfile,
+        dpi=args.dpi,
+        figsize=figsize,
+    )
 
 
 if __name__ == "__main__":
