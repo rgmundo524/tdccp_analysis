@@ -2,14 +2,20 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
+import sys
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import numpy as np
 import pandas as pd
 
 BASE = Path(__file__).resolve().parent.parent
+SCRIPTS_DIR = Path(__file__).resolve().parent
+PY = sys.executable
 SWAPS_CSV = BASE / "data" / "swaps.csv"
 OUT_DIR   = BASE / "outputs" / "analysis"
 
+PRESSURE_SPIKES = SCRIPTS_DIR / "plot_tdccp_pressure_vs_price_spikes.py"
 TDCCP_SYMBOL = "TDCCP"
 TDCCP_MINT   = "Hg8bKz4mvs8KNj9zew1cEF9tDw1x2GViB4RFZjVEmfrD"
 
@@ -39,6 +45,18 @@ def load_swaps(start: str|None, end: str|None) -> pd.DataFrame:
     df = df.loc[involved].copy()
     if df.empty: raise SystemExit("No TDCCP-involving swaps in the selected time window.")
     return df
+
+
+def _sanitize_float_for_tag(value: float) -> str:
+    """Return a filesystem-friendly representation of a float."""
+    try:
+        dec = Decimal(str(value)).normalize()
+    except InvalidOperation:
+        dec = Decimal(value)
+    as_str = format(dec, "f").rstrip("0").rstrip(".")
+    if not as_str:
+        as_str = "0"
+    return as_str.replace("-", "neg").replace(".", "p")
 
 def compute_volumes(df: pd.DataFrame, bucket: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return (vol_direct, vol_all) indexed by bucket with buy/sell."""
@@ -130,8 +148,25 @@ def main():
                     help="Comma-separated list of buckets to analyze (e.g. 1d,12h,6h,3h,1h,30min,10min)")
     ap.add_argument("--start", help="UTC start (YYYY-mm-dd)")
     ap.add_argument("--end",   help="UTC end (YYYY-mm-dd)")
-    ap.add_argument("--min-delta-pct", type=float, default=25.0,
-                    help="Minimum |delta_direct_pct| to mark a spike (default 25)")
+    ap.add_argument(
+        "--min-delta-pct",
+        type=float,
+        default=25.0,
+        help=(
+            "Minimum sell-side delta_direct_pct magnitude to mark a spike "
+            "(filters buckets where delta_direct_pct ≤ -threshold; default 25). "
+            "Ignored when --top-sell-count is positive."
+        ),
+    )
+    ap.add_argument(
+        "--top-sell-count",
+        type=int,
+        default=0,
+        help=(
+            "When > 0, ignore --min-delta-pct and instead select the top N sell-heavy "
+            "buckets by most-negative delta_direct for highlighting and downstream exports."
+        ),
+    )
     ap.add_argument("--top-n", type=int, default=50, help="Top N addresses to include (default 50)")
     ap.add_argument("--routing-thresh", type=float, default=0.25,
                     help="Flag bucket as routing_heavy_bucket if (all-direct)/all > thresh (default 0.25)")
@@ -161,25 +196,79 @@ def main():
         vol_dir, vol_all = compute_volumes(df, bucket)
         metrics = compute_metrics(vol_dir, vol_all, args.routing_thresh)
 
-        # write bucket metrics (includes direct & all + routing_heavy_bucket)
-        buckets_path = OUT_DIR / f"spike_buckets_{bucket}_{daterange}.csv"
-        metrics.reset_index(drop=False).rename(columns={"index":"bucket"}).to_csv(buckets_path, index=False)
+        # pick spike buckets either by threshold or top-N sell deltas
+        if args.top_sell_count > 0:
+            sellers = metrics[metrics["delta_direct"] < 0].copy()
+            sellers = (
+                sellers.reset_index(drop=False)
+                .rename(columns={"index": "bucket"})
+                .sort_values(
+                    ["delta_direct", "sell_direct", "bucket"],
+                    ascending=[True, False, True],
+                )
+            )
+            sel = sellers.head(args.top_sell_count)
+            mode_tag = f"topsell{args.top_sell_count}"
+        else:
+            sell_thresh = abs(args.min_delta_pct)
+            sel = metrics[metrics["delta_direct_pct"] <= -sell_thresh].copy()
+            mode_tag = f"mindelta{_sanitize_float_for_tag(sell_thresh)}"
+        if args.top_sell_count > 0:
+            sel_buckets = list(sel["bucket"])
+        else:
+            sel_buckets = list(sel.index)
+        metrics_out = metrics.assign(selected_spike=metrics.index.isin(sel_buckets))
 
-        # pick spike buckets by direct delta pct
-        sel = metrics[metrics["delta_direct_pct"].abs() >= args.min_delta_pct].copy()
-        sel_buckets = list(sel.index)
+        # write bucket metrics (includes direct & all + routing_heavy_bucket)
+        buckets_path = OUT_DIR / f"spike_buckets_{bucket}_{mode_tag}_{daterange}.csv"
+        metrics_out.reset_index(drop=False).rename(columns={"index":"bucket"}).to_csv(
+            buckets_path, index=False
+        )
 
         # addresses & raw swaps for the selected buckets
         addr_top, swaps_out = top_addresses_for_buckets(df, bucket, sel_buckets, args.top_n)
-        addr_path  = OUT_DIR / f"spike_addresses_{bucket}_{daterange}.csv"
-        swaps_path = OUT_DIR / f"spike_swaps_{bucket}_{daterange}.csv"
+        addr_path  = OUT_DIR / f"spike_addresses_{bucket}_{mode_tag}_{daterange}.csv"
+        swaps_path = OUT_DIR / f"spike_swaps_{bucket}_{mode_tag}_{daterange}.csv"
         addr_top.to_csv(addr_path, index=False)
         swaps_out.to_csv(swaps_path, index=False)
 
         if args.debug:
-            print(f"[{bucket}] buckets={len(metrics)} spikes={len(sel_buckets)} "
-                  f"addr_top={len(addr_top)} swaps={len(swaps_out)}")
+            mode = (
+                f"top {min(len(sel), args.top_sell_count)} sell" if args.top_sell_count > 0
+                else f"≤ -{abs(args.min_delta_pct)} pct"
+            )
+            print(
+                f"[{bucket}] buckets={len(metrics)} spikes={len(sel_buckets)} (mode={mode}) "
+                f"addr_top={len(addr_top)} swaps={len(swaps_out)}"
+            )
             print(f"[write] {buckets_path.name}, {addr_path.name}, {swaps_path.name}")
+
+        if PRESSURE_SPIKES.exists():
+            plot_cmd = [
+                PY, str(PRESSURE_SPIKES),
+                "--bucket", bucket,
+                "--metrics", str(buckets_path),
+                "--mode-tag", mode_tag,
+            ]
+            if args.top_sell_count > 0:
+                plot_cmd += ["--top-sell-count", str(args.top_sell_count)]
+            else:
+                plot_cmd += ["--min-delta-pct", str(args.min_delta_pct)]
+            if args.start:
+                plot_cmd += ["--start", args.start]
+            if args.end:
+                plot_cmd += ["--end", args.end]
+            if args.debug:
+                plot_cmd.append("--debug")
+            try:
+                subprocess.run(plot_cmd, check=True)
+            except subprocess.CalledProcessError as exc:
+                raise SystemExit(
+                    f"[error] plot_tdccp_pressure_vs_price_spikes failed (bucket={bucket}) → rc={exc.returncode}"
+                )
+        else:
+            if args.debug:
+                print(f"[warn] spike highlight script missing: {PRESSURE_SPIKES}")
 
 if __name__ == "__main__":
     main()
