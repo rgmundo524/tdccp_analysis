@@ -88,4 +88,4 @@ Render a per-transaction bubble chart (with TDCCP price overlay) for a specific 
 python scripts/plot_tdccp_address_transactions_bubble.py --owner <FROM_ADDRESS>
 ```
 
-The script automatically respects the `START`/`END` window from `settings.csv`, fetches the owner's TDCCP balance-change history from Solscan, classifies each transaction (buy, sell, transfer, or airdrop), writes a CSV summary to `data/addresses/`, and saves the bubble chart to `outputs/figures/`.
+The script automatically respects the `START`/`END` window from `settings.csv`, fetches the owner's TDCCP balance-change history from Solscan, classifies each transaction (buy, sell, transfer, or airdrop), writes a CSV summary to `data/addresses/`, and saves the bubble chart to `outputs/figures/`. The overlayed TDCCP price line is resampled to an hourly series for consistency with the balance-change cadence.

@@ -219,6 +219,15 @@ def legend_handles(color_map: Dict[str, str]) -> Iterable[Line2D]:
         )
 
 
+def tint_legend_text(legend, color_map: Dict[str, str]) -> None:
+    if legend is None:
+        return
+    for text in legend.get_texts():
+        key = text.get_text().strip().lower()
+        if key in color_map:
+            text.set_color(color_map[key])
+
+
 def fmt_tdccp(v, _pos):
     try:
         if abs(v) >= 1_000_000:
@@ -230,6 +239,20 @@ def fmt_tdccp(v, _pos):
         return f"{v:.2f}"
     except Exception:
         return str(v)
+
+
+def resample_price_hourly(price: pd.DataFrame) -> pd.DataFrame:
+    if price.empty:
+        return price
+    hourly = (
+        price.set_index("ts")
+        .resample("1h")
+        .last()
+        .dropna(subset=["price_usd"])
+        .reset_index()
+        .sort_values("ts")
+    )
+    return hourly
 
 
 # ---------------------------------------------------------------------------
@@ -425,19 +448,45 @@ def plot_transactions(
 
     # Legend
     handles = list(legend_handles(colors))
-    ax.legend(handles=handles, title="Classification", loc="upper left", frameon=True, framealpha=0.9)
+    legend = ax.legend(
+        handles=handles,
+        title="Classification",
+        loc="upper left",
+        frameon=True,
+        framealpha=0.9,
+    )
+    tint_legend_text(legend, colors)
 
     # Secondary axis for price
     if price is not None and not price.empty:
+        price = resample_price_hourly(price)
+    if price is not None and not price.empty:
         ax2 = ax.twinx()
-        ax2.plot(price["ts"], price["price_usd"], color="black", linewidth=1.2, alpha=0.85, label="TDCCP Price (USD)")
-        ax2.set_ylabel("TDCCP Price (USD)")
+        ax2.plot(
+            price["ts"],
+            price["price_usd"],
+            color="black",
+            linewidth=1.2,
+            alpha=0.85,
+            label="TDCCP Price (USD, hourly)",
+        )
+        ax2.set_ylabel("TDCCP Price (USD, hourly)")
         ax2.yaxis.set_major_formatter(FuncFormatter(fmt_tdccp))
         ax2.grid(False)
         # combine legends
         lines1, labels1 = ax.get_legend_handles_labels()
         lines2, labels2 = ax2.get_legend_handles_labels()
-        ax.legend(lines1 + lines2, labels1 + labels2, loc="upper left", frameon=True, framealpha=0.9)
+        legend = ax.legend(
+            lines1 + lines2,
+            labels1 + labels2,
+            loc="upper left",
+            frameon=True,
+            framealpha=0.9,
+        )
+        tint_legend_text(legend, colors)
+    else:
+        tint_legend_text(ax.get_legend(), colors)
+
 
     fig.autofmt_xdate()
     outfile.parent.mkdir(parents=True, exist_ok=True)
