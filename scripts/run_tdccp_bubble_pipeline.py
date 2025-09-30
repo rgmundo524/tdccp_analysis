@@ -12,6 +12,7 @@ BUILDER = ROOT / "scripts" / "build_bubble_pipeline.py"
 PLOT_A  = ROOT / "scripts" / "plot_tdccp_address_bubble.py"
 PLOT_B  = ROOT / "scripts" / "plot_tdccp_address_bubble_by_label.py"
 PLOT_C  = ROOT / "scripts" / "plot_tdccp_address_bubble_with_spikes.py"
+PLOT_TX = ROOT / "scripts" / "plot_tdccp_address_transactions_bubble.py"
 
 def read_settings_value(key_name: str) -> str | None:
     if not SETTINGS.exists():
@@ -39,6 +40,31 @@ def window_label_from_settings() -> str | None:
     s = read_settings_value("START"); e = read_settings_value("END")
     if not s or not e: return None
     return f"{s.replace('-','')}-{e.replace('-','')}"
+
+def window_bounds_from_settings() -> tuple[str | None, str | None]:
+    return read_settings_value("START"), read_settings_value("END")
+
+def read_from_addresses(path: Path) -> list[str]:
+    addrs: list[str] = []
+    with path.open("r", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        header = next(reader, None)
+        idx = None
+        if header:
+            for i, col in enumerate(header):
+                lc = (col or "").strip().lower()
+                if lc == "from_address":
+                    idx = i
+                    break
+        if idx is None:
+            raise SystemExit(f"[error] spike CSV missing 'from_address' column: {path}")
+        for row in reader:
+            if not row or len(row) <= idx:
+                continue
+            addr = (row[idx] or "").strip()
+            if addr:
+                addrs.append(addr)
+    return addrs
 
 def run(cmd: list[str], step: str = ""):
     rc = subprocess.call(cmd)
@@ -84,7 +110,28 @@ def main():
         if label: plotC += ["--window-label", label]
         run(plotC, step="plot spike-highlight bubble")
 
-    if spike_path:
+        start_bound, end_bound = window_bounds_from_settings()
+        if not start_bound or not end_bound:
+            print("[warn] settings.csv missing START/END → skipping transaction bubble renders.")
+        else:
+            addresses = read_from_addresses(spike_path)
+            unique_addrs = sorted(set(addresses))
+            if not unique_addrs:
+                print(f"[warn] no from_address rows in {spike_path}; skipping transaction bubble renders.")
+            else:
+                print(f"[pipeline] rendering transaction bubbles for {len(unique_addrs)} spike addresses…")
+                for addr in unique_addrs:
+                    plot_tx = [
+                        PY,
+                        str(PLOT_TX),
+                        "--owner",
+                        addr,
+                        "--start",
+                        start_bound,
+                        "--end",
+                        end_bound,
+                    ]
+                    run(plot_tx, step=f"plot transaction bubble ({addr})")
         print("[pipeline] bubble charts plus spike-highlight render complete.")
     else:
         print("[pipeline] bubble charts complete.")

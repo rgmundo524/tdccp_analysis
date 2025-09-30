@@ -79,4 +79,13 @@ Human-maintained config file. Important rows:
 Run:
 ```bash
 python scripts/run_tdccp_pipeline.py
+```
 
+### 2. Address transaction bubble chart
+Render a per-transaction bubble chart (with TDCCP price overlay) for a specific wallet:
+
+```bash
+python scripts/plot_tdccp_address_transactions_bubble.py --owner <FROM_ADDRESS>
+```
+
+The script automatically respects the `START`/`END` window from `settings.csv`, fetches the owner's TDCCP balance-change history from Solscan, classifies each transaction (buy, sell, transfer, or airdrop), writes a CSV summary to `data/addresses/`, and saves the bubble chart to `outputs/figures/`.
