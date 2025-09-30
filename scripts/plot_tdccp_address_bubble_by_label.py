@@ -138,11 +138,9 @@ def compute_sizes(n: pd.Series) -> pd.Series:
     n = pd.to_numeric(n, errors="coerce").fillna(0).clip(lower=1)
     return np.sqrt(n) * 40.0
 
-
 def slugify_label(label: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9]+", "_", label.strip()).strip("_")
     return slug or "group"
-
 
 def build_vibrant_palette(count: int) -> List[str]:
     """Return a list of high-contrast, saturated colors for the given count."""
