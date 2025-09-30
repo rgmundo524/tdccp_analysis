@@ -6,6 +6,8 @@ import csv
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import colorsys
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -136,6 +138,35 @@ def compute_sizes(n: pd.Series) -> pd.Series:
     return np.sqrt(n) * 40.0
 
 
+def build_vibrant_palette(count: int) -> List[str]:
+    """Return a list of high-contrast, saturated colors for the given count."""
+
+    if count <= 0:
+        return []
+
+    palette: List[str] = []
+    tableau = list(mcolors.TABLEAU_COLORS.values())
+    palette.extend(tableau[: min(count, len(tableau))])
+
+    if len(palette) == count:
+        return palette
+
+    remaining = count - len(palette)
+
+    # Spread additional colors around the HSV wheel using the golden ratio to
+    # avoid repeating hues while keeping saturation/value high for vibrancy.
+    golden_ratio = 0.61803398875
+    hue = 0.0
+    for idx in range(remaining):
+        hue = (hue + golden_ratio) % 1.0
+        saturation = 0.78 if idx % 3 == 0 else 0.88
+        value = 0.9 if idx % 2 == 0 else 0.82
+        r, g, b = colorsys.hsv_to_rgb(hue, saturation, value)
+        palette.append(mcolors.to_hex((r, g, b)))
+
+    return palette
+
+
 # ----------------------------- plotting --------------------------------
 def plot_bubbles_by_label(
     df: pd.DataFrame,
@@ -194,16 +225,14 @@ def plot_bubbles_by_label(
             display_labels.append(lab)
 
     # Build a dynamic palette: 'Other' stays light gray, address-label colors
-    # draw from a tab20 colormap sized to the number of unique labels defined in
-    # settings.csv.  This ensures we can grow beyond the handful of original
-    # groups without hard-coding specific hues.
+    # draw from a vibrant generator that starts with Tableau's saturated hues
+    # and then rotates evenly around the color wheel.  This keeps each label
+    # visually distinct even as new groups are added to settings.csv.
     color_map: Dict[str, str] = {"Other": "#D3D3D3"}
     if label_order:
-        cmap = plt.get_cmap("tab20", len(label_order))
-        colors = getattr(cmap, "colors", cmap(np.linspace(0, 1, len(label_order), endpoint=False)))
+        vibrant_colors = build_vibrant_palette(len(label_order))
         for idx, lab in enumerate(label_order):
-            color_map[lab] = mcolors.to_hex(colors[idx % len(colors)])
-
+            color_map[lab] = vibrant_colors[idx % len(vibrant_colors)]
 
     # Figure
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
