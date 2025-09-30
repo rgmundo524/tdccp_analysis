@@ -141,7 +141,17 @@ def main():
         default=25.0,
         help=(
             "Minimum sell-side delta_direct_pct magnitude to mark a spike "
-            "(filters buckets where delta_direct_pct ≤ -threshold; default 25)"
+            "(filters buckets where delta_direct_pct ≤ -threshold; default 25). "
+            "Ignored when --top-sell-count is positive."
+        ),
+    )
+    ap.add_argument(
+        "--top-sell-count",
+        type=int,
+        default=0,
+        help=(
+            "When > 0, ignore --min-delta-pct and instead select the top N sell-heavy "
+            "buckets by most-negative delta_direct for highlighting and downstream exports."
         ),
     )
     ap.add_argument("--top-n", type=int, default=50, help="Top N addresses to include (default 50)")
@@ -173,15 +183,24 @@ def main():
         vol_dir, vol_all = compute_volumes(df, bucket)
         metrics = compute_metrics(vol_dir, vol_all, args.routing_thresh)
 
+        # pick spike buckets either by threshold or top-N sell deltas
+        if args.top_sell_count > 0:
+            sellers = metrics[metrics["delta_direct"] < 0].copy()
+            sellers = sellers.sort_values(
+                ["delta_direct", "sell_direct", "bucket"], ascending=[True, False, True]
+            )
+            sel = sellers.head(args.top_sell_count)
+        else:
+            sell_thresh = abs(args.min_delta_pct)
+            sel = metrics[metrics["delta_direct_pct"] <= -sell_thresh].copy()
+        sel_buckets = list(sel.index)
+        metrics_out = metrics.assign(selected_spike=metrics.index.isin(sel_buckets))
+
         # write bucket metrics (includes direct & all + routing_heavy_bucket)
         buckets_path = OUT_DIR / f"spike_buckets_{bucket}_{daterange}.csv"
-        metrics.reset_index(drop=False).rename(columns={"index":"bucket"}).to_csv(buckets_path, index=False)
-
-        # pick spike buckets where direct flow is sell-heavy beyond the threshold
-        sell_thresh = abs(args.min_delta_pct)
-        sel = metrics[metrics["delta_direct_pct"] <= -sell_thresh].copy()
-        sel_buckets = list(sel.index)
-
+        metrics_out.reset_index(drop=False).rename(columns={"index":"bucket"}).to_csv(
+            buckets_path, index=False
+        )
         # addresses & raw swaps for the selected buckets
         addr_top, swaps_out = top_addresses_for_buckets(df, bucket, sel_buckets, args.top_n)
         addr_path  = OUT_DIR / f"spike_addresses_{bucket}_{daterange}.csv"
@@ -190,8 +209,14 @@ def main():
         swaps_out.to_csv(swaps_path, index=False)
 
         if args.debug:
-            print(f"[{bucket}] buckets={len(metrics)} spikes={len(sel_buckets)} "
-                  f"addr_top={len(addr_top)} swaps={len(swaps_out)}")
+            mode = (
+                f"top {min(len(sel), args.top_sell_count)} sell" if args.top_sell_count > 0
+                else f"≤ -{abs(args.min_delta_pct)} pct"
+            )
+            print(
+                f"[{bucket}] buckets={len(metrics)} spikes={len(sel_buckets)} (mode={mode}) "
+                f"addr_top={len(addr_top)} swaps={len(swaps_out)}"
+            )
             print(f"[write] {buckets_path.name}, {addr_path.name}, {swaps_path.name}")
 
         if PRESSURE_SPIKES.exists():
@@ -199,8 +224,11 @@ def main():
                 PY, str(PRESSURE_SPIKES),
                 "--bucket", bucket,
                 "--metrics", str(buckets_path),
-                "--min-delta-pct", str(args.min_delta_pct),
             ]
+            if args.top_sell_count > 0:
+                plot_cmd += ["--top-sell-count", str(args.top_sell_count)]
+            else:
+                plot_cmd += ["--min-delta-pct", str(args.min_delta_pct)]
             if args.start:
                 plot_cmd += ["--start", args.start]
             if args.end:

@@ -105,8 +105,13 @@ def _load_flows(
 
 
 def _collect_spike_windows(
-    metrics_path: Path, min_delta_pct: float, debug: bool = False
-) -> list[pd.Timestamp]:
+    metrics_path: Path,
+    bucket: str,
+    *,
+    min_delta_pct: float | None = None,
+    top_sell_count: int = 0,
+    debug: bool = False,
+) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
     if not metrics_path.exists():
         sys.exit(f"[error] metrics csv not found: {metrics_path}")
     df = pd.read_csv(metrics_path)
@@ -115,14 +120,46 @@ def _collect_spike_windows(
             "[error] metrics csv missing required columns 'bucket' and 'delta_direct_pct'"
         )
     df["bucket"] = pd.to_datetime(df["bucket"], utc=True, errors="coerce")
-    df = df.dropna(subset=["bucket"])
-    thresh = abs(min_delta_pct)
-    spikes = df.loc[df["delta_direct_pct"] <= -thresh, "bucket"].sort_values()
-    if debug:
-        print(
-            f"[spikes] {len(spikes)} sell-heavy buckets with delta_direct_pct ≤ -{thresh}"
+    df = df.dropna(subset=["bucket"]).sort_values("bucket")
+
+    if top_sell_count > 0:
+        if "delta_direct" not in df.columns:
+            sys.exit(
+                "[error] metrics csv missing 'delta_direct' required for --top-sell-count mode"
+            )
+        sellers = df[df["delta_direct"] < 0].copy()
+        sellers = sellers.sort_values(
+            ["delta_direct", "sell_direct", "bucket"], ascending=[True, False, True]
         )
-    return list(spikes)
+        selected = sellers.head(top_sell_count)
+        if debug:
+            print(
+                f"[spikes] using top {len(selected)} sell-heavy buckets by delta_direct (most negative)"
+            )
+    else:
+        thresh = abs(min_delta_pct or 0.0)
+        selected = df[df["delta_direct_pct"] <= -thresh]
+        if debug:
+            print(
+                f"[spikes] {len(selected)} sell-heavy buckets with delta_direct_pct ≤ -{thresh}"
+            )
+
+    starts = selected["bucket"].dropna().drop_duplicates().tolist()
+    starts.sort()
+    width = _bucket_to_timedelta(bucket)
+    merged: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    for ts in starts:
+        if pd.isna(ts):
+            continue
+        if not merged:
+            merged.append((ts, ts + width))
+            continue
+        last_start, last_end = merged[-1]
+        if ts <= last_end:
+            merged[-1] = (last_start, max(last_end, ts + width))
+        else:
+            merged.append((ts, ts + width))
+    return merged
 
 
 def _plot_bucket_with_spikes(
@@ -131,7 +168,8 @@ def _plot_bucket_with_spikes(
     price: Optional[pd.DataFrame],
     label: str,
     outfile_dir: Path,
-    spike_starts: Iterable[pd.Timestamp],
+    spike_windows: Iterable[tuple[pd.Timestamp, pd.Timestamp]],
+
     debug: bool = False,
 ) -> Path:
     if flows.empty:
@@ -181,9 +219,8 @@ def _plot_bucket_with_spikes(
         ax2.yaxis.set_major_formatter(FuncFormatter(format_ytick_plain))
         ax2.grid(False)
 
-    spike_starts = list(spike_starts)
-    if spike_starts:
-        width = _bucket_to_timedelta(bucket)
+    spike_windows = list(spike_windows)
+    if spike_windows:
         ax.relim()
         ax.autoscale_view()
         ymin, ymax = ax.get_ylim()
@@ -192,10 +229,7 @@ def _plot_bucket_with_spikes(
             ymin -= pad
             ymax += pad
             ax.set_ylim(ymin, ymax)
-        for start in spike_starts:
-            if pd.isna(start):
-                continue
-            end = start + width
+        for start, end in spike_windows:
             span = ax.axvspan(
                 start,
                 end,
@@ -239,10 +273,19 @@ def main() -> None:
     ap.add_argument(
         "--min-delta-pct",
         type=float,
-        required=True,
+        default=25.0,
         help=(
             "Threshold applied to delta_direct_pct (only buckets with sell-side "
-            "imbalance ≤ -threshold are highlighted)"
+            "imbalance ≤ -threshold are highlighted). Ignored when --top-sell-count > 0."
+        ),
+    )
+    ap.add_argument(
+        "--top-sell-count",
+        type=int,
+        default=0,
+        help=(
+            "When > 0, highlight the top N sell-heavy buckets by most-negative delta_direct "
+            "instead of using --min-delta-pct."
         ),
     )
     ap.add_argument("--start", help="UTC start YYYY-mm-dd (defaults to settings START)")
@@ -280,7 +323,18 @@ def main() -> None:
     if price_df is not None:
         price_df = price_df[(price_df["ts"] >= start) & (price_df["ts"] < end)]
 
-    spikes = _collect_spike_windows(Path(args.metrics), args.min_delta_pct, debug=args.debug)
+    if args.top_sell_count <= 0 and args.min_delta_pct is None:
+        sys.exit(
+            "[error] provide --min-delta-pct or a positive --top-sell-count to choose spike windows"
+        )
+
+    spikes = _collect_spike_windows(
+        Path(args.metrics),
+        args.bucket,
+        min_delta_pct=args.min_delta_pct,
+        top_sell_count=args.top_sell_count,
+        debug=args.debug,
+    )
 
     out = _plot_bucket_with_spikes(
         args.bucket,
