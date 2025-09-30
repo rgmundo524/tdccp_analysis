@@ -60,6 +60,21 @@ def compute_sizes(n: pd.Series) -> pd.Series:
     return np.sqrt(n) * 40.0
 
 
+def make_legend_marker(color: str, markersize: float = 12.0) -> Line2D:
+    """Return a uniform-sized circular marker for legend entries."""
+
+    return Line2D(
+        [0],
+        [0],
+        marker="o",
+        color="white",
+        markerfacecolor=color,
+        markeredgecolor="black",
+        markeredgewidth=0.5,
+        markersize=markersize,
+    )
+
+
 def bucket_definitions() -> List[Tuple[str, int, int, str]]:
     return [
         ("1", 1, 1, "#1f77b4"),
@@ -151,17 +166,8 @@ def plot_bubbles(
     bucket_colors: Dict[str, str] = {name: color for name, _, _, color in bucket_definitions()}
     for label in [lab for lab in bucket_colors if (label_groups == lab).any()]:
         color = bucket_colors[label]
-        proxy = Line2D(
-            [0],
-            [0],
-            marker="o",
-            color="white",
-            markerfacecolor=color,
-            markeredgecolor="black",
-            markeredgewidth=0.5,
-            markersize=10,
-        )
-        legend_handles.append(proxy)
+        legend_handles.append(make_legend_marker(color))
+
         legend_labels.append(label)
 
     if legend_handles:

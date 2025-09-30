@@ -139,6 +139,21 @@ def compute_sizes(n: pd.Series) -> pd.Series:
     return np.sqrt(n) * 40.0
 
 
+def make_legend_marker(color: str, markersize: float = 12.0) -> Line2D:
+    """Return a uniform-sized circular marker for legend entries."""
+
+    return Line2D(
+        [0],
+        [0],
+        marker="o",
+        color="white",
+        markerfacecolor=color,
+        markeredgecolor="black",
+        markeredgewidth=0.5,
+        markersize=markersize,
+    )
+
+
 def slugify_label(label: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9]+", "_", label.strip()).strip("_")
     return slug or "group"
@@ -219,13 +234,14 @@ def render_bubble_plot(
     ax.grid(True, which="major", linestyle="--", alpha=0.35)
     ax.grid(True, which="minor", axis="x", linestyle=":", alpha=0.2)
 
-    legend_handles: List = []
+    legend_handles: List[Line2D] = []
     legend_labels: List[str] = []
     for lab in display_labels:
         mask = (label_series == lab)
         color = highlight_colors.get(lab, color_map.get(lab, "#D3D3D3"))
         if mask.any():
-            scatter = ax.scatter(
+            ax.scatter(
+
                 sub.loc[mask, "peak_balance_ui"],
                 sub.loc[mask, "net_ui"],
                 s=sizes.loc[mask].to_numpy(),
@@ -235,21 +251,8 @@ def render_bubble_plot(
                 linewidths=0.5,
                 label=lab,
             )
-            legend_handles.append(scatter)
-            legend_labels.append(lab)
-        else:
-            proxy = Line2D(
-                [0],
-                [0],
-                marker="o",
-                color="white",
-                markerfacecolor=color,
-                markeredgecolor="black",
-                markeredgewidth=0.5,
-                markersize=10,
-            )
-            legend_handles.append(proxy)
-            legend_labels.append(lab)
+        legend_handles.append(make_legend_marker(color))
+        legend_labels.append(lab)
 
     title = "Address Bubbles — TDCCP"
     if window_label:
