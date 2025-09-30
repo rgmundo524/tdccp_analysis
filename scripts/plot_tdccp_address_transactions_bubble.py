@@ -481,6 +481,7 @@ def plot_transactions(
         )
         tint_legend_text(legend, colors, display_names)
 
+
     # Secondary axis for price
     if price is not None and not price.empty:
         price = resample_price_hourly(price)
@@ -510,6 +511,7 @@ def plot_transactions(
         tint_legend_text(legend, colors, display_names)
     else:
         tint_legend_text(ax.get_legend(), colors, display_names)
+
 
     fig.autofmt_xdate()
     outfile.parent.mkdir(parents=True, exist_ok=True)
