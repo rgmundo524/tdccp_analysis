@@ -204,6 +204,7 @@ def plot_bubbles_by_label(
         for idx, lab in enumerate(label_order):
             color_map[lab] = mcolors.to_hex(colors[idx % len(colors)])
 
+
     # Figure
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
     ax.set_facecolor("white")
