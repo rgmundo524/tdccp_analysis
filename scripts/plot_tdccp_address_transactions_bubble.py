@@ -201,11 +201,16 @@ def detect_airdrop(amount: float, classification: Optional[SwapClassification], 
 
 def compute_bubble_sizes(amounts: pd.Series) -> np.ndarray:
     base = amounts.abs().clip(lower=1e-4)
-    return np.sqrt(base) * 80.0
+    return np.sqrt(base) * 25.0
 
 
-def legend_handles(color_map: Dict[str, str]) -> Iterable[Line2D]:
-    for label, color in color_map.items():
+def legend_handles(
+    color_map: Dict[str, str],
+    labels: Iterable[str],
+    display_map: Dict[str, str],
+) -> Iterable[Line2D]:
+    for label in labels:
+        color = color_map[label]
         yield Line2D(
             [0],
             [0],
@@ -215,17 +220,25 @@ def legend_handles(color_map: Dict[str, str]) -> Iterable[Line2D]:
             markeredgecolor="black",
             markeredgewidth=0.6,
             markersize=12,
-            label=label.title(),
+            label=display_map.get(label, label.title()),
         )
 
 
-def tint_legend_text(legend, color_map: Dict[str, str]) -> None:
+def tint_legend_text(legend, color_map: Dict[str, str], display_map: Dict[str, str]) -> None:
     if legend is None:
         return
+    reverse_display = {display: key for key, display in display_map.items()}
     for text in legend.get_texts():
         key = text.get_text().strip().lower()
+        match_key = None
         if key in color_map:
-            text.set_color(color_map[key])
+            match_key = key
+        else:
+            lookup = reverse_display.get(text.get_text().strip())
+            if lookup:
+                match_key = lookup
+        if match_key and match_key in color_map:
+            text.set_color(color_map[match_key])
 
 
 def fmt_tdccp(v, _pos):
@@ -419,9 +432,19 @@ def plot_transactions(
         "transfer": "#1f77b4",
         "airdrop": "#9467bd",
     }
-    df["classification"] = df["classification"].astype(str)
+    display_names = {
+        "buy": "Buy (green)",
+        "sell": "Sell (red)",
+        "transfer": "Normal transfer (blue)",
+        "airdrop": "Airdrop (purple)",
+    }
+    df["classification"] = df["classification"].astype(str).str.lower()
     df["color"] = df["classification"].map(lambda v: colors.get(v, "#7f7f7f"))
     sizes = compute_bubble_sizes(df["abs_amount_ui"])
+
+    legend_order = ["buy", "sell", "transfer", "airdrop"]
+    present_set = set(df["classification"])
+    present_labels = [label for label in legend_order if label in present_set]
 
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
     ax.set_facecolor("white")
@@ -447,15 +470,17 @@ def plot_transactions(
     ax.set_title(title, fontsize=18, pad=14)
 
     # Legend
-    handles = list(legend_handles(colors))
-    legend = ax.legend(
-        handles=handles,
-        title="Classification",
-        loc="upper left",
-        frameon=True,
-        framealpha=0.9,
-    )
-    tint_legend_text(legend, colors)
+    if present_labels:
+        handles = list(legend_handles(colors, present_labels, display_names))
+        legend = ax.legend(
+            handles=handles,
+            title="Classification",
+            loc="upper left",
+            frameon=True,
+            framealpha=0.9,
+        )
+        tint_legend_text(legend, colors, display_names)
+
 
     # Secondary axis for price
     if price is not None and not price.empty:
@@ -483,9 +508,9 @@ def plot_transactions(
             frameon=True,
             framealpha=0.9,
         )
-        tint_legend_text(legend, colors)
+        tint_legend_text(legend, colors, display_names)
     else:
-        tint_legend_text(ax.get_legend(), colors)
+        tint_legend_text(ax.get_legend(), colors, display_names)
 
 
     fig.autofmt_xdate()
