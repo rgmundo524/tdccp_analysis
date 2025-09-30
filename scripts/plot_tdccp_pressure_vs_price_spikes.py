@@ -169,6 +169,7 @@ def _plot_bucket_with_spikes(
     label: str,
     outfile_dir: Path,
     spike_windows: Iterable[tuple[pd.Timestamp, pd.Timestamp]],
+
     debug: bool = False,
 ) -> Path:
     if flows.empty:
