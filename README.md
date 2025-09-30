@@ -98,4 +98,4 @@ Run the direct-flow spike scanner to emit analysis CSVs and spike-highlight pres
 python scripts/analyze_spikes.py --start <YYYY-MM-DD> --end <YYYY-MM-DD>
 ```
 
-For every requested bucket the script now invokes `plot_tdccp_pressure_vs_price_spikes.py`, which reuses the swaps window to draw the standard volume-vs-price lines and outlines spike buckets (where `|delta_direct_pct|` clears the threshold) with red vertical rectangles. Resulting figures are written alongside the base pressure/price plots in `outputs/figures/`.
+For every requested bucket the script now invokes `plot_tdccp_pressure_vs_price_spikes.py`, which reuses the swaps window to draw the standard volume-vs-price lines and outlines sell-heavy spike buckets (where `delta_direct_pct` is at or below `-min_delta_pct`) with red vertical rectangles. Resulting figures are written alongside the base pressure/price plots in `outputs/figures/`.

@@ -104,7 +104,9 @@ def _load_flows(
     return flows
 
 
-def _collect_spike_windows(metrics_path: Path, min_delta_pct: float, debug: bool = False) -> list[pd.Timestamp]:
+def _collect_spike_windows(
+    metrics_path: Path, min_delta_pct: float, debug: bool = False
+) -> list[pd.Timestamp]:
     if not metrics_path.exists():
         sys.exit(f"[error] metrics csv not found: {metrics_path}")
     df = pd.read_csv(metrics_path)
@@ -114,9 +116,12 @@ def _collect_spike_windows(metrics_path: Path, min_delta_pct: float, debug: bool
         )
     df["bucket"] = pd.to_datetime(df["bucket"], utc=True, errors="coerce")
     df = df.dropna(subset=["bucket"])
-    spikes = df.loc[df["delta_direct_pct"].abs() >= min_delta_pct, "bucket"].sort_values()
+    thresh = abs(min_delta_pct)
+    spikes = df.loc[df["delta_direct_pct"] <= -thresh, "bucket"].sort_values()
     if debug:
-        print(f"[spikes] {len(spikes)} buckets flagged with |delta_direct_pct| ≥ {min_delta_pct}")
+        print(
+            f"[spikes] {len(spikes)} sell-heavy buckets with delta_direct_pct ≤ -{thresh}"
+        )
     return list(spikes)
 
 
@@ -231,7 +236,15 @@ def main() -> None:
     )
     ap.add_argument("--bucket", required=True, help="Resample bucket size (e.g. 1d,12h,3h,1h,30min)")
     ap.add_argument("--metrics", required=True, help="Path to spike metrics CSV for the bucket")
-    ap.add_argument("--min-delta-pct", type=float, required=True, help="Threshold applied to delta_direct_pct")
+    ap.add_argument(
+        "--min-delta-pct",
+        type=float,
+        required=True,
+        help=(
+            "Threshold applied to delta_direct_pct (only buckets with sell-side "
+            "imbalance ≤ -threshold are highlighted)"
+        ),
+    )
     ap.add_argument("--start", help="UTC start YYYY-mm-dd (defaults to settings START)")
     ap.add_argument("--end", help="UTC end YYYY-mm-dd (defaults to settings END)")
     ap.add_argument("--symbol", default="TDCCP", help="Symbol fallback when mint columns show symbols")

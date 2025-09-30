@@ -135,8 +135,15 @@ def main():
                     help="Comma-separated list of buckets to analyze (e.g. 1d,12h,6h,3h,1h,30min,10min)")
     ap.add_argument("--start", help="UTC start (YYYY-mm-dd)")
     ap.add_argument("--end",   help="UTC end (YYYY-mm-dd)")
-    ap.add_argument("--min-delta-pct", type=float, default=25.0,
-                    help="Minimum |delta_direct_pct| to mark a spike (default 25)")
+    ap.add_argument(
+        "--min-delta-pct",
+        type=float,
+        default=25.0,
+        help=(
+            "Minimum sell-side delta_direct_pct magnitude to mark a spike "
+            "(filters buckets where delta_direct_pct ≤ -threshold; default 25)"
+        ),
+    )
     ap.add_argument("--top-n", type=int, default=50, help="Top N addresses to include (default 50)")
     ap.add_argument("--routing-thresh", type=float, default=0.25,
                     help="Flag bucket as routing_heavy_bucket if (all-direct)/all > thresh (default 0.25)")
@@ -170,8 +177,9 @@ def main():
         buckets_path = OUT_DIR / f"spike_buckets_{bucket}_{daterange}.csv"
         metrics.reset_index(drop=False).rename(columns={"index":"bucket"}).to_csv(buckets_path, index=False)
 
-        # pick spike buckets by direct delta pct
-        sel = metrics[metrics["delta_direct_pct"].abs() >= args.min_delta_pct].copy()
+        # pick spike buckets where direct flow is sell-heavy beyond the threshold
+        sell_thresh = abs(args.min_delta_pct)
+        sel = metrics[metrics["delta_direct_pct"] <= -sell_thresh].copy()
         sel_buckets = list(sel.index)
 
         # addresses & raw swaps for the selected buckets
