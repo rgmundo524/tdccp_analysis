@@ -167,7 +167,6 @@ def plot_bubbles(
     for label in [lab for lab in bucket_colors if (label_groups == lab).any()]:
         color = bucket_colors[label]
         legend_handles.append(make_legend_marker(color))
-
         legend_labels.append(label)
 
     if legend_handles:

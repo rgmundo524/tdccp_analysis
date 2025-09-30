@@ -241,7 +241,6 @@ def render_bubble_plot(
         color = highlight_colors.get(lab, color_map.get(lab, "#D3D3D3"))
         if mask.any():
             ax.scatter(
-
                 sub.loc[mask, "peak_balance_ui"],
                 sub.loc[mask, "net_ui"],
                 s=sizes.loc[mask].to_numpy(),
@@ -289,7 +288,6 @@ def render_bubble_plot(
 
     fig.tight_layout(pad=0.6)
     fig.savefig(out, bbox_inches="tight", dpi=dpi)
-
     plt.close(fig)
     print(f"[done] {out}")
     return out
@@ -303,7 +301,6 @@ def plot_bubbles_by_label(
     outfile: Optional[Path] = None,
     dpi: int = 400,
     figsize: Tuple[float, float] = (24.0, 12.0),
-
 ) -> List[Path]:
     """
     Render address bubble plots with colors driven by settings labels.

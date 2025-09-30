@@ -2,284 +2,293 @@
 from __future__ import annotations
 
 import argparse
-import csv
+import sys
 from pathlib import Path
-from typing import Dict, Tuple, List, Optional, Set
+from typing import Iterable, List, Optional, Set, Tuple
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-from matplotlib.ticker import FuncFormatter, LogLocator, NullLocator
+from matplotlib.lines import Line2D
+from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
 
-# ---------- defaults ----------
-BASE = Path(__file__).resolve().parents[1]
-DEFAULT_METRICS = BASE / "data" / "addresses" / "tdccp_address_metrics.csv"
-DEFAULT_SETTINGS = BASE / "settings.csv"
-OUT_DIR = BASE / "outputs" / "figures"
-# ------------------------------
 
-# --------- formatters / ticks ---------
-def eng_formatter_with_B(x: float, _pos=None) -> str:
-    """English engineering formatter using k, M, B (instead of G), T."""
-    if x == 0:
-        return "0"
-    sign = "-" if x < 0 else ""
-    a = abs(x)
-    if a < 1:
-        # show small numbers with up to 3 decimals
-        return f"{sign}{a:.3g}"
-    if a < 1e3:
-        return f"{sign}{a:.0f}"
-    if a < 1e6:
-        return f"{sign}{a/1e3:.0f}k"
-    if a < 1e9:
-        return f"{sign}{a/1e6:.0f}M"
-    if a < 1e12:
-        return f"{sign}{a/1e9:.0f}B"  # key difference vs 'G'
-    return f"{sign}{a/1e12:.0f}T"
+ROOT = Path(__file__).resolve().parents[1]
+DATA_DIR = ROOT / "data"
+DEFAULT_METRICS = DATA_DIR / "addresses" / "tdccp_address_metrics.csv"
+OUT_DIR = ROOT / "outputs" / "figures"
 
-ENG_FMT = FuncFormatter(eng_formatter_with_B)
 
-def set_log_x_with_decades_and_deciles(ax: plt.Axes, data_min: float, data_max: float):
-    """Log X axis with major ticks at decades, minor ticks at 20..90% between decades."""
-    # clamp lower bound to 1 if all positive and we want a clean scale
-    lo = max(1.0, float(np.nanmin([data_min, 1.0])))
-    hi = float(max(data_max, lo * 10))
-
-    ax.set_xscale("log")
-    # major decades
-    ax.xaxis.set_major_locator(LogLocator(base=10.0, numticks=20))
-    ax.xaxis.set_major_formatter(ENG_FMT)
-
-    # minor: 2..9 * each decade (i.e., 20%, 30%, .. 90%)
-    ax.xaxis.set_minor_locator(LogLocator(base=10.0, subs=np.arange(2, 10) * 0.1, numticks=100))
-    # no special minor formatter
-    ax.set_xlim(lo, hi)
-
-def set_symlog_y(ax: plt.Axes, data: pd.Series, linthresh: float = 1.0):
-    """Symmetric log; show actual numbers with EngFormatter."""
-    ax.set_yscale("symlog", linthresh=linthresh, linscale=1.0, base=10.0)
-    ax.yaxis.set_major_formatter(ENG_FMT)
-    # Let Matplotlib decide limits but ensure we include extremes:
-    ymin = np.nanmin([data.min(), -linthresh*10])
-    ymax = np.nanmax([data.max(), linthresh*10])
-    if np.isfinite(ymin) and np.isfinite(ymax) and ymin < ymax:
-        ax.set_ylim(ymin, ymax)
-
-# --------- settings.csv helpers ---------
-def read_address_labels(settings_csv: Path) -> Dict[str, str]:
-    """
-    Read settings.csv (Category, Key, Value, ...) and return
-    { from_address -> label } for rows where Category == 'address' (case-insensitive).
-    """
-    if not settings_csv.exists():
-        return {}
-    # Read with csv module (tolerant of comments/extra cols)
-    labels: Dict[str, str] = {}
-    with settings_csv.open("r", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        header = next(reader, None)
-        # Default column indexes
-        cat_i, key_i, val_i = 0, 1, 2
-        if header:
-            # try to find by name
-            cols = [c.strip().lower() for c in header]
-            if "category" in cols: cat_i = cols.index("category")
-            if "key"      in cols: key_i = cols.index("key")
-            if "value"    in cols: val_i = cols.index("value")
-        for row in reader:
-            if not row or len(row) <= max(cat_i, key_i, val_i):
-                continue
-            cat = (row[cat_i] or "").strip().lower()
-            key = (row[key_i] or "").strip()
-            val = (row[val_i] or "").strip()
-            if cat == "address" and key:
-                labels[key] = val or "Labeled"
-    return labels
-
-def read_spike_addresses(spike_csv: Path) -> Set[str]:
-    """
-    Read spike addresses CSV (must contain 'from_address'). Returns a set of addresses.
-    """
-    df = pd.read_csv(spike_csv)
-    if "from_address" not in df.columns:
-        raise SystemExit(f"[error] spike addresses file missing 'from_address' column: {spike_csv}")
-    return set(df["from_address"].astype(str))
-
-# --------- color palette helpers ---------
-def make_color_cycle(n: int) -> List[str]:
-    """
-    Return an array of n distinct colors (cycling if needed) with a readable palette.
-    """
-    base = [
-        "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
-        "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
-        "#bcbd22", "#17becf"
-    ]
-    if n <= len(base):
-        return base[:n]
-    out = []
-    i = 0
-    while len(out) < n:
-        out.append(base[i % len(base)])
-        i += 1
-    return out
-
-# --------- plotting ---------
-def plot_bubbles_by_label(
-    metrics_csv: Path,
-    settings_csv: Path,
-    outfile: Path,
-    top_labels: int = 20,
-    figsize: Tuple[float, float] = (20.0, 12.0),
-    dpi: int = 180,
-    window_label: Optional[str] = None,
-    spike_addresses_csv: Optional[Path] = None,
-):
-    """
-    Plot address bubbles using label groups from settings.csv[address] and (optionally)
-    add a 'Spike' group from spike_addresses_csv.
-    """
-    df = pd.read_csv(metrics_csv)
-    need = {"from_address", "peak_balance_ui", "net_ui", "direct_txn_count"}
+# ----------------------------- helpers ---------------------------------
+def load_metrics(path: Path) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    need = {"from_address", "net_ui", "peak_balance_ui", "direct_txn_count"}
     missing = need - set(df.columns)
     if missing:
         raise SystemExit(f"[error] metrics csv missing columns: {sorted(missing)}")
+    return df
 
-    # Coerce types
-    df["from_address"] = df["from_address"].astype(str)
-    df["peak_balance_ui"] = pd.to_numeric(df["peak_balance_ui"], errors="coerce")
-    df["net_ui"] = pd.to_numeric(df["net_ui"], errors="coerce")
-    df["direct_txn_count"] = pd.to_numeric(df["direct_txn_count"], errors="coerce").fillna(0).astype(int)
 
-    # Positive peak filter (so log scale is valid)
-    df = df[df["peak_balance_ui"] > 0].copy()
-    if df.empty:
-        raise SystemExit("[info] No rows with peak_balance_ui > 0 to plot.")
+def fmt_y_plain(v, _pos):
+    try:
+        iv = int(v)
+        if abs(v - iv) < 1e-9:
+            return f"{iv:,}"
+        return f"{v:,.2f}"
+    except Exception:
+        return str(v)
 
-    # Labels from settings
-    addr_labels = read_address_labels(settings_csv)
-    df["label"] = df["from_address"].map(addr_labels).fillna("Other")
 
-    # If spike file present, overwrite label to "Spike" for those addresses
-    if spike_addresses_csv:
-        spike_set = read_spike_addresses(spike_addresses_csv)
-        df.loc[df["from_address"].isin(spike_set), "label"] = "Spike"
+def fmt_x_decades(v, _pos):
+    if v <= 0:
+        return ""
+    p = int(round(np.log10(v)))
+    val = 10 ** p
+    if abs(v - val) > 1e-9:
+        return ""
+    if val < 1_000:
+        return f"{int(val)}"
+    if val < 1_000_000:
+        return f"{int(val/1_000)}k"
+    if val < 1_000_000_000:
+        return f"{int(val/1_000_000)}M"
+    return f"{int(val/1_000_000_000)}B"
 
-    # Colors for unique labels (excluding "Other" which will be light gray at the end)
-    labels_order = [l for l in sorted(df["label"].unique()) if l != "Other"]
-    colors = make_color_cycle(len(labels_order))
-    label_to_color = {lbl: col for lbl, col in zip(labels_order, colors)}
-    # Grey for unlabeled
-    label_to_color["Other"] = "#c9c9c9"
 
-    # Bubble size (dynamic by direct swaps)
-    dcnt = df["direct_txn_count"].clip(lower=0)
-    sizes = 24.0 + 18.0 * np.sqrt(dcnt)  # continuous size
+def compute_sizes(n: pd.Series) -> pd.Series:
+    n = pd.to_numeric(n, errors="coerce").fillna(0).clip(lower=1)
+    return np.sqrt(n) * 40.0
 
-    # Figure
-    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
 
-    # Plot by label group to ensure legend is grouped
-    for lbl in labels_order + (["Other"] if "Other" in df["label"].unique() else []):
-        sub = df[df["label"] == lbl]
-        if sub.empty:
+def make_legend_marker(color: str, markersize: float = 12.0) -> Line2D:
+    return Line2D(
+        [0],
+        [0],
+        marker="o",
+        color="white",
+        markerfacecolor=color,
+        markeredgecolor="black",
+        markeredgewidth=0.5,
+        markersize=markersize,
+    )
+
+
+def bucket_definitions() -> List[Tuple[str, int, int, str]]:
+    return [
+        ("1", 1, 1, "#1f77b4"),
+        ("2–10", 2, 10, "#ff7f0e"),
+        ("11–50", 11, 50, "#2ca02c"),
+        ("51–100", 51, 100, "#d62728"),
+        ("101–500", 101, 500, "#9467bd"),
+        ("501–1000", 501, 1000, "#8c564b"),
+        ("1000+", 1001, np.inf, "#17becf"),
+    ]
+
+
+def assign_buckets(tx_counts: pd.Series) -> Tuple[pd.Series, pd.Series]:
+    buckets = bucket_definitions()
+    labels: List[str] = []
+    colors: List[str] = []
+    for count in tx_counts.to_numpy():
+        label = "1000+"
+        color = "#17becf"
+        for name, start, end, hex_color in buckets:
+            if start <= count <= end:
+                label = name
+                color = hex_color
+                break
+        labels.append(label)
+        colors.append(color)
+    return pd.Series(labels, index=tx_counts.index), pd.Series(colors, index=tx_counts.index)
+
+
+def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    sub = df.copy()
+    sub = sub[sub["peak_balance_ui"] > 0]
+    sub = sub[sub["direct_txn_count"].fillna(0) > 0]
+    if "percent_intermediary" in sub.columns:
+        sub = sub[sub["percent_intermediary"].fillna(0) == 0]
+    if sub.empty:
+        raise SystemExit("[error] no rows to plot after filtering (peak>0, direct>0, !intermediary).")
+    sub["from_address"] = sub["from_address"].astype(str)
+    return sub
+
+
+def read_highlight_addresses(path: Path) -> Set[str]:
+    df = pd.read_csv(path)
+    if "from_address" not in df.columns:
+        raise SystemExit(
+            f"[error] highlight csv missing 'from_address' column: {path}"
+        )
+    return set(df["from_address"].astype(str))
+
+
+def parse_figsize(s: str) -> Tuple[float, float]:
+    try:
+        w_str, h_str = (s.split(",", 1) if "," in s else s.split("x", 1))
+        return float(w_str), float(h_str)
+    except Exception as exc:
+        raise SystemExit("[error] --figsize must be 'width,height' (e.g. 24,12)") from exc
+
+
+# ----------------------------- plotting --------------------------------
+def plot_bubbles(
+    df: pd.DataFrame,
+    window_label: Optional[str],
+    outfile: Path,
+    figsize: Tuple[float, float],
+    dpi: int,
+    highlight_addrs: Iterable[str] | None,
+) -> None:
+    sub = prepare_dataframe(df)
+    tx_counts = pd.to_numeric(sub["direct_txn_count"], errors="coerce").fillna(0)
+    sizes = compute_sizes(tx_counts)
+    label_groups, bucket_colors = assign_buckets(tx_counts.astype(int))
+
+    highlight_set: Set[str] = set()
+    for addr in (highlight_addrs or []):
+        if isinstance(addr, float) and np.isnan(addr):
             continue
+        addr_str = str(addr).strip()
+        if addr_str:
+            highlight_set.add(addr_str)
+    highlight_mask = (
+        sub["from_address"].isin(highlight_set)
+        if highlight_set
+        else pd.Series(False, index=sub.index, dtype=bool)
+    )
+
+    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    ax.set_facecolor("white")
+
+    # Background addresses (non-highlighted)
+    background = sub[~highlight_mask]
+    if not background.empty:
         ax.scatter(
-            sub["peak_balance_ui"].values,
-            sub["net_ui"].values,
-            s=sizes[sub.index],
-            c=label_to_color[lbl],
-            alpha=0.7,
-            edgecolor="none",
-            label=f"{lbl} ({len(sub)})",
-            zorder=3 if lbl != "Other" else 2
+            background["peak_balance_ui"],
+            background["net_ui"],
+            s=sizes.loc[background.index].to_numpy(),
+            color=bucket_colors.loc[background.index].to_numpy(),
+            alpha=0.6,
+            edgecolors="black",
+            linewidths=0.5,
+            zorder=2,
         )
 
-    # Axes
-    set_log_x_with_decades_and_deciles(ax, df["peak_balance_ui"].min(), df["peak_balance_ui"].max())
-    set_symlog_y(ax, df["net_ui"], linthresh=1.0)
+    # Highlighted addresses
+    highlight_color = "#ff3366"
+    highlighted = sub[highlight_mask]
+    if not highlighted.empty:
+        ax.scatter(
+            highlighted["peak_balance_ui"],
+            highlighted["net_ui"],
+            s=sizes.loc[highlighted.index].to_numpy(),
+            color=highlight_color,
+            alpha=0.85,
+            edgecolors="black",
+            linewidths=0.8,
+            zorder=3,
+        )
 
-    # Gridlines (major + minor on x; major only on y to avoid clutter)
-    ax.grid(True, which="major", linestyle="--", alpha=0.25)
-    ax.grid(True, which="minor", axis="x", linestyle=":", alpha=0.15)
+    ax.set_xscale("log", base=10)
+    ax.xaxis.set_major_locator(LogLocator(base=10))
+    ax.xaxis.set_major_formatter(FuncFormatter(fmt_x_decades))
+    ax.xaxis.set_minor_locator(LogLocator(base=10, subs=tuple(np.arange(2, 10) * 0.1)))
+    ax.xaxis.set_minor_formatter(NullFormatter())
 
-    ax.set_xlabel("Peak TDCCP balance (units, log scale)")
-    ax.set_ylabel("Net TDCCP volume (buy − sell, symmetric log)")
+    max_x = sub["peak_balance_ui"].max()
+    right = 10 ** np.ceil(np.log10(max(1.0, max_x)))
+    ax.set_xlim(left=1.0, right=right)
 
-    # Title
-    ttl = "TDCCP Address Bubbles by Label"
+    ax.set_yscale("symlog", base=10, linthresh=1.0, linscale=1.0)
+    ax.yaxis.set_major_formatter(FuncFormatter(fmt_y_plain))
+    ax.axhline(0, color="#606060", linewidth=1.0, alpha=0.8, zorder=0)
+
+    ax.grid(True, which="major", linestyle="--", alpha=0.35)
+    ax.grid(True, which="minor", axis="x", linestyle=":", alpha=0.2)
+
+    ax.set_xlabel("Peak Balance (TDCCP)", fontsize=16)
+    ax.set_ylabel("Net Volume (TDCCP)", fontsize=16)
+    ax.tick_params(axis="both", labelsize=13)
+
+    legend_handles: List[Line2D] = []
+    legend_labels: List[str] = []
+    bucket_map = {name: color for name, _, _, color in bucket_definitions()}
+    for label in bucket_map:
+        mask = (label_groups == label) & (~highlight_mask)
+        if mask.any():
+            legend_handles.append(make_legend_marker(bucket_map[label]))
+            legend_labels.append(label)
+
+    if not highlighted.empty:
+        legend_handles.append(make_legend_marker(highlight_color))
+        legend_labels.append("Highlighted addresses")
+
+    if legend_handles:
+        legend_title = "Direct swaps (color buckets)"
+        ax.legend(
+            legend_handles,
+            legend_labels,
+            title=legend_title,
+            loc="upper left",
+            frameon=True,
+            framealpha=0.9,
+            fontsize=12,
+            title_fontsize=13,
+        )
+
+    title = "Address Bubbles — TDCCP"
     if window_label:
-        ttl += f" — {window_label}"
-    ax.set_title(ttl, pad=10)
+        title += f" — {window_label}"
+    if highlight_set:
+        title += " (highlighted addresses)"
+    ax.set_title(title, pad=16, fontsize=20)
 
-    # # Label top N addresses by |net_ui|
-    # if top_labels and top_labels > 0:
-    #     top = df.reindex(df["net_ui"].abs().sort_values(ascending=False).head(top_labels).index)
-    #     for _, r in top.iterrows():
-    #         ax.annotate(
-    #             r["from_address"][:8],
-    #             (r["peak_balance_ui"], r["net_ui"]),
-    #             textcoords="offset points",
-    #             xytext=(6, 4),
-    #             ha="left",
-    #             fontsize=8,
-    #             alpha=0.85,
-    #             zorder=5,
-    #         )
-
-    # Legend (labels)
-    leg = ax.legend(loc="best", frameon=False, title="Label (count)")
-    if leg and leg.get_title():
-        leg.get_title().set_fontsize(10)
-
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    fig.savefig(outfile, bbox_inches="tight")
+    outfile.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout(pad=0.6)
+    fig.savefig(outfile, bbox_inches="tight", dpi=dpi)
     plt.close(fig)
     print(f"[done] {outfile}")
 
-# --------- CLI ---------
+
+# ------------------------------ CLI ------------------------------------
 def main():
     ap = argparse.ArgumentParser(
-        description="Plot TDCCP address bubble chart colored by settings.csv address labels; optionally highlight a spike addresses group."
+        description="Plot TDCCP address bubble chart and highlight addresses supplied via CSV."
     )
-    ap.add_argument("--metrics", type=Path, default=DEFAULT_METRICS, help="Path to tdccp_address_metrics.csv")
-    ap.add_argument("--settings", type=Path, default=DEFAULT_SETTINGS, help="Path to settings.csv")
-    ap.add_argument("--spike-addresses", type=Path, help="Path to spike_addresses_*.csv (optional). If provided, a 'Spike' group is added.")
-    ap.add_argument("--top-labels", type=int, default=20, help="Annotate top-N addresses by |net_ui|")
-    ap.add_argument("--figsize", default="40x20", help="Figure size as WxH in inches (default: 20x12)")
-    ap.add_argument("--dpi", type=int, default=300, help="Figure DPI")
-    ap.add_argument("--outfile", type=Path, default=None, help="Output PNG path (default auto)")
-    ap.add_argument("--window-label", default=None, help="Text to append in the title/filename (e.g., 20250301-20250503)")
+    ap.add_argument("--metrics", default=str(DEFAULT_METRICS), help="Path to metrics CSV")
+    ap.add_argument("--spike-addresses", type=str, help="CSV of addresses to highlight")
+    ap.add_argument("--settings", type=str, default=None, help="(ignored) maintained for pipeline compatibility")
+    ap.add_argument("--figsize", type=str, default="24,12", help="Figure size in inches (width,height)")
+    ap.add_argument("--dpi", type=int, default=400, help="Figure DPI (default: 400)")
+    ap.add_argument("--outfile", type=str, help="Output path (PNG)")
+    ap.add_argument("--window-label", type=str, help="Optional label for chart title & filename")
+    ap.add_argument("--top-labels", type=int, default=0, help="(ignored) kept for pipeline compatibility")
     args = ap.parse_args()
 
-    if not args.metrics.exists():
-        raise SystemExit(f"[error] metrics file not found: {args.metrics}")
-    if not args.settings.exists():
-        raise SystemExit(f"[error] settings.csv not found: {args.settings}")
+    metrics = Path(args.metrics)
+    if not metrics.exists():
+        sys.exit(f"[error] metrics not found: {metrics}")
 
-    # parse figsize
-    try:
-        w, h = (float(p) for p in args.figsize.lower().split("x"))
-        figsize = (w, h)
-    except Exception:
-        figsize = (20.0, 12.0)
+    df = load_metrics(metrics)
+    figsize = parse_figsize(args.figsize)
+    dpi = int(args.dpi)
 
-    # outfile
-    if args.outfile is None:
-        tag = args.window_label or "window"
-        args.outfile = OUT_DIR / f"Address_Bubbles_by_label_{tag}.png"
+    highlight_set: Iterable[str] | None = None
+    if args.spike_addresses:
+        highlight_path = Path(args.spike_addresses)
+        if not highlight_path.exists():
+            sys.exit(f"[error] spike addresses file not found: {highlight_path}")
+        highlight_set = read_highlight_addresses(highlight_path)
 
-    plot_bubbles_by_label(
-        metrics_csv=args.metrics,
-        settings_csv=args.settings,
-        outfile=args.outfile,
-        top_labels=args.top_labels,
-        figsize=figsize,
-        dpi=args.dpi,
-        window_label=args.window_label,
-        spike_addresses_csv=args.spike_addresses,
-    )
+    if args.outfile:
+        outfile = Path(args.outfile)
+    else:
+        tag = args.window_label or "all"
+        outfile = OUT_DIR / f"Address_Bubbles_addresses_{tag}_highlighted.png"
+
+    plot_bubbles(df, args.window_label, outfile, figsize, dpi, highlight_set)
+
 
 if __name__ == "__main__":
     main()
