@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 import re
 
 import colorsys
@@ -189,6 +189,53 @@ def build_vibrant_palette(count: int) -> List[str]:
 
 
 # ----------------------------- plotting --------------------------------
+def normalize_addresses(addrs: Iterable[str]) -> Set[str]:
+    result: Set[str] = set()
+    for addr in addrs:
+        if isinstance(addr, float) and np.isnan(addr):
+            continue
+        addr_str = str(addr).strip()
+        if addr_str:
+            result.add(addr_str)
+    return result
+
+
+def _resolve_address_column(columns: Iterable[str]) -> Optional[str]:
+    normalized = [(col, (col or "").strip().lower()) for col in columns if col]
+    preferred = [
+        "from_address",
+        "address",
+        "addr",
+        "wallet_address",
+        "wallet",
+        "spike_address",
+        "highlight_address",
+        "account_address",
+        "account",
+    ]
+    for target in preferred:
+        for original, lowered in normalized:
+            if lowered == target:
+                return original
+
+    for original, lowered in normalized:
+        if "address" in lowered and not lowered.startswith("to_"):
+            return original
+    return None
+
+
+def read_highlight_addresses(path: Path) -> Set[str]:
+    df = pd.read_csv(path)
+    column = _resolve_address_column(df.columns)
+    if not column:
+        cols = ", ".join(df.columns)
+        raise SystemExit(
+            "[error] highlight csv missing an address column (expected something "
+            f"like 'from_address'). Columns present: {cols}"
+        )
+    return normalize_addresses(df[column].astype(str))
+
+
 def render_bubble_plot(
     sub: pd.DataFrame,
     sizes: pd.Series,
@@ -200,6 +247,7 @@ def render_bubble_plot(
     figsize: Tuple[float, float],
     highlight_label: Optional[str] = None,
     outfile: Optional[Path] = None,
+    highlight_set: Optional[Set[str]] = None,
 ) -> Path:
     highlight_colors: Dict[str, str] = {}
     if highlight_label:
@@ -234,16 +282,23 @@ def render_bubble_plot(
     ax.grid(True, which="major", linestyle="--", alpha=0.35)
     ax.grid(True, which="minor", axis="x", linestyle=":", alpha=0.2)
 
+    highlight_mask = (
+        sub["from_address"].isin(highlight_set)
+        if highlight_set
+        else pd.Series(False, index=sub.index, dtype=bool)
+    )
+
     legend_handles: List[Line2D] = []
     legend_labels: List[str] = []
     for lab in display_labels:
         mask = (label_series == lab)
         color = highlight_colors.get(lab, color_map.get(lab, "#D3D3D3"))
-        if mask.any():
+        base_mask = mask & ~highlight_mask
+        if base_mask.any():
             ax.scatter(
-                sub.loc[mask, "peak_balance_ui"],
-                sub.loc[mask, "net_ui"],
-                s=sizes.loc[mask].to_numpy(),
+                sub.loc[base_mask, "peak_balance_ui"],
+                sub.loc[base_mask, "net_ui"],
+                s=sizes.loc[base_mask].to_numpy(),
                 color=color,
                 alpha=0.6,
                 edgecolors="black",
@@ -252,6 +307,22 @@ def render_bubble_plot(
             )
         legend_handles.append(make_legend_marker(color))
         legend_labels.append(lab)
+
+    highlight_color = "#ff3366"
+    highlighted = sub[highlight_mask]
+    if not highlighted.empty:
+        ax.scatter(
+            highlighted["peak_balance_ui"],
+            highlighted["net_ui"],
+            s=sizes.loc[highlighted.index].to_numpy(),
+            color=highlight_color,
+            alpha=0.85,
+            edgecolors="black",
+            linewidths=0.8,
+            zorder=3,
+        )
+        legend_handles.append(make_legend_marker(highlight_color))
+        legend_labels.append("Highlighted")
 
     title = "Address Bubbles — TDCCP"
     if window_label:
@@ -301,6 +372,7 @@ def plot_bubbles_by_label(
     outfile: Optional[Path] = None,
     dpi: int = 400,
     figsize: Tuple[float, float] = (24.0, 12.0),
+    highlight_addrs: Optional[Set[str]] = None,
 ) -> List[Path]:
     """
     Render address bubble plots with colors driven by settings labels.
@@ -330,6 +402,8 @@ def plot_bubbles_by_label(
 
     if sub.empty:
         raise SystemExit("[error] no rows to plot after filtering (peak>0, direct>0, !intermediary).")
+
+    sub["from_address"] = sub["from_address"].astype(str)
 
     # Sizes (continuous by direct swaps)
     sizes = compute_sizes(sub["direct_txn_count"])
@@ -384,6 +458,7 @@ def plot_bubbles_by_label(
         figsize,
         highlight_label=None,
         outfile=outfile,
+        highlight_set=highlight_addrs,
     )
     outputs.append(combined_out)
 
@@ -402,6 +477,7 @@ def plot_bubbles_by_label(
             figsize,
             highlight_label=lab,
             outfile=None,
+            highlight_set=highlight_addrs,
         )
         outputs.append(highlight_out)
 
@@ -421,6 +497,7 @@ def main():
     ap.add_argument("--figsize", default="24,12", help="Figure size in inches (width,height)")
     # accepted but ignored—keeps pipeline compatibility without altering output
     ap.add_argument("--top-labels", type=int, default=0, help="(ignored) kept only for pipeline compatibility")
+    ap.add_argument("--highlight-addresses", help="Optional CSV of from_address values to highlight")
 
     args = ap.parse_args()
 
@@ -448,6 +525,13 @@ def main():
         figsize = (24.0, 12.0)
 
     outfile = Path(args.outfile) if args.outfile else None
+    highlight_set: Optional[Set[str]] = None
+    if args.highlight_addresses:
+        highlight_path = Path(args.highlight_addresses)
+        if not highlight_path.exists():
+            raise SystemExit(f"[error] highlight csv not found: {highlight_path}")
+        highlight_set = read_highlight_addresses(highlight_path)
+
     plot_bubbles_by_label(
         df,
         labels_map,
@@ -456,6 +540,7 @@ def main():
         outfile=outfile,
         dpi=args.dpi,
         figsize=figsize,
+        highlight_addrs=highlight_set,
     )
 
 
