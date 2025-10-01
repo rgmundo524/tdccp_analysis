@@ -91,7 +91,18 @@ python scripts/plot_tdccp_address_transactions_bubble.py --owner <FROM_ADDRESS>
 
 The script automatically respects the `START`/`END` window from `settings.csv`, fetches the owner's TDCCP balance-change history from Solscan, classifies each transaction (buy, sell, transfer, or airdrop), writes a CSV summary to `data/addresses/`, and saves the bubble chart to `outputs/figures/`. The overlayed TDCCP price line is resampled to an hourly series for consistency with the balance-change cadence.
 
-### 3. Spike-highlight pressure vs. price plots
+### 3. Export net-negative addresses for bubble review
+Create a CSV of wallets whose TDCCP net volume is below zero, flagging the ones that are *not* listed as airdrop recipients in `settings.csv`:
+
+```bash
+python scripts/export_tdccp_negative_net_addresses.py \
+  --include-column direct_txn_count \
+  --min-abs-net 500
+```
+
+The export lands in `outputs/analysis/tdccp_negative_net_addresses.csv` by default and mirrors the address-bubble inputs so you can spotlight organic sell-heavy participants separately from the known airdrop cohort.
+
+### 4. Spike-highlight pressure vs. price plots
 Run the direct-flow spike scanner to emit analysis CSVs and spike-highlight pressure/price plots:
 
 ```bash
