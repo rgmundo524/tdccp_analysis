@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -112,7 +112,60 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         sub = sub[sub["percent_intermediary"].fillna(0) == 0]
     if sub.empty:
         raise SystemExit("[error] no rows to plot after filtering (peak>0, direct>0, !intermediary).")
+    sub["from_address"] = sub["from_address"].astype(str)
     return sub
+
+
+def normalize_addresses(addrs: Iterable[str]) -> Set[str]:
+    normalized: Set[str] = set()
+    for addr in addrs:
+        if isinstance(addr, float) and np.isnan(addr):
+            continue
+        addr_str = str(addr).strip()
+        if addr_str:
+            normalized.add(addr_str)
+    return normalized
+
+
+def _resolve_address_column(columns: Iterable[str]) -> Optional[str]:
+    """Return the column name that holds addresses if present."""
+
+    normalized = [(col, (col or "").strip().lower()) for col in columns if col]
+    # Prefer explicit matches first.
+    preferred = [
+        "from_address",
+        "address",
+        "addr",
+        "wallet_address",
+        "wallet",
+        "spike_address",
+        "highlight_address",
+        "account_address",
+        "account",
+    ]
+    for target in preferred:
+        for original, lowered in normalized:
+            if lowered == target:
+                return original
+
+    # Fallback to any column that looks like an address while avoiding obvious
+    # false positives such as to_address.
+    for original, lowered in normalized:
+        if "address" in lowered and not lowered.startswith("to_"):
+            return original
+    return None
+
+
+def read_highlight_addresses(path: Path) -> Set[str]:
+    df = pd.read_csv(path)
+    column = _resolve_address_column(df.columns)
+    if not column:
+        cols = ", ".join(df.columns)
+        raise SystemExit(
+            "[error] highlight csv missing an address column (expected something "
+            f"like 'from_address'). Columns present: {cols}"
+        )
+    return normalize_addresses(df[column].astype(str))
 
 
 # ----------------------------- plotting --------------------------------
@@ -122,23 +175,47 @@ def plot_bubbles(
     outfile: Path,
     figsize: Tuple[float, float],
     dpi: int,
+    highlight_addrs: Optional[Set[str]] = None,
 ) -> None:
     sub = prepare_dataframe(df)
     sizes = compute_sizes(sub["direct_txn_count"])
     label_groups, colors = assign_buckets(sub["direct_txn_count"].astype(int))
 
+    highlight_set: Set[str] = set(highlight_addrs or set())
+    highlight_mask = (
+        sub["from_address"].isin(highlight_set)
+        if highlight_set
+        else pd.Series(False, index=sub.index, dtype=bool)
+    )
+
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
     ax.set_facecolor("white")
 
-    ax.scatter(
-        sub["peak_balance_ui"],
-        sub["net_ui"],
-        s=sizes.to_numpy(),
-        color=colors.to_numpy(),
-        alpha=0.6,
-        edgecolors="black",
-        linewidths=0.5,
-    )
+    background = sub[~highlight_mask]
+    if not background.empty:
+        ax.scatter(
+            background["peak_balance_ui"],
+            background["net_ui"],
+            s=sizes.loc[background.index].to_numpy(),
+            color=colors.loc[background.index].to_numpy(),
+            alpha=0.6,
+            edgecolors="black",
+            linewidths=0.5,
+        )
+
+    highlight_color = "#ff3366"
+    highlighted = sub[highlight_mask]
+    if not highlighted.empty:
+        ax.scatter(
+            highlighted["peak_balance_ui"],
+            highlighted["net_ui"],
+            s=sizes.loc[highlighted.index].to_numpy(),
+            color=highlight_color,
+            alpha=0.85,
+            edgecolors="black",
+            linewidths=0.8,
+            zorder=3,
+        )
 
     ax.set_xscale("log", base=10)
     ax.xaxis.set_major_locator(LogLocator(base=10))
@@ -168,6 +245,10 @@ def plot_bubbles(
         color = bucket_colors[label]
         legend_handles.append(make_legend_marker(color))
         legend_labels.append(label)
+
+    if not highlighted.empty:
+        legend_handles.append(make_legend_marker(highlight_color))
+        legend_labels.append("Highlighted")
 
     if legend_handles:
         ax.legend(
@@ -211,6 +292,10 @@ def main():
     ap.add_argument("--top-labels", type=int, default=0, help="(ignored) kept for pipeline compatibility")
     ap.add_argument("--min-peak", type=float, default=0.0, help="(ignored) maintained for compatibility")
     ap.add_argument("--min-direct", type=int, default=0, help="(ignored) maintained for compatibility")
+    ap.add_argument(
+        "--highlight-addresses",
+        help="Optional CSV of from_address values to highlight",
+    )
     args = ap.parse_args()
 
     metrics = Path(args.metrics)
@@ -218,6 +303,12 @@ def main():
         sys.exit(f"[error] metrics not found: {metrics}")
 
     df = load_metrics(metrics)
+    highlight_set: Optional[Set[str]] = None
+    if args.highlight_addresses:
+        highlight_path = Path(args.highlight_addresses)
+        if not highlight_path.exists():
+            sys.exit(f"[error] highlight csv not found: {highlight_path}")
+        highlight_set = read_highlight_addresses(highlight_path)
     figsize = parse_figsize(args.figsize)
     dpi = int(args.dpi)
 
@@ -227,7 +318,7 @@ def main():
         tag = args.window_label or "all"
         outfile = OUT_DIR / f"Address_Bubbles_addresses_{tag}.png"
 
-    plot_bubbles(df, args.window_label, outfile, figsize, dpi)
+    plot_bubbles(df, args.window_label, outfile, figsize, dpi, highlight_addrs=highlight_set)
 
 
 if __name__ == "__main__":

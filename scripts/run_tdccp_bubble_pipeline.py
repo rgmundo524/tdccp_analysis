@@ -13,6 +13,77 @@ PLOT_A  = ROOT / "scripts" / "plot_tdccp_address_bubble.py"
 PLOT_B  = ROOT / "scripts" / "plot_tdccp_address_bubble_by_label.py"
 PLOT_C  = ROOT / "scripts" / "plot_tdccp_address_bubble_with_spikes.py"
 
+
+def _csv_header(path: Path) -> list[str]:
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.reader(handle)
+            header = next(reader, [])
+    except Exception:
+        return []
+    return [h for h in header if h]
+
+
+def _has_address_column(header: list[str]) -> bool:
+    normalized = [(col, col.strip().lower()) for col in header if col]
+    preferred = {
+        "from_address",
+        "address",
+        "addr",
+        "wallet_address",
+        "wallet",
+        "spike_address",
+        "highlight_address",
+        "account_address",
+        "account",
+    }
+    for original, lowered in normalized:
+        if lowered in preferred:
+            return True
+    for original, lowered in normalized:
+        if "address" in lowered and not lowered.startswith("to_"):
+            return True
+    return False
+
+
+def _resolve_spike_addresses(path: Path) -> tuple[Path | None, list[str]]:
+    """Return (resolved_path, log_messages)."""
+
+    messages: list[str] = []
+    resolved = path
+
+    if "spike_buckets_" in path.name and "spike_addresses_" not in path.name:
+        candidate_name = path.name.replace("spike_buckets_", "spike_addresses_", 1)
+        candidate = path.with_name(candidate_name)
+        if candidate.exists():
+            messages.append(
+                f"[pipeline] Detected spike bucket CSV; using companion address file {candidate_name}."
+            )
+            resolved = candidate
+        else:
+            messages.append(
+                "[warn] Spike CSV lacks address column and matching file "
+                f"{candidate_name} was not found. Skipping highlight overlays."
+            )
+            return None, messages
+
+    header = _csv_header(resolved)
+    if not header:
+        messages.append(
+            f"[warn] Could not read header from spike CSV {resolved}. Skipping highlight overlays."
+        )
+        return None, messages
+
+    if not _has_address_column(header):
+        cols = ", ".join(header)
+        messages.append(
+            "[warn] Spike CSV does not include an address column (expected something like "
+            f"'from_address'). Columns: {cols}. Skipping highlight overlays."
+        )
+        return None, messages
+
+    return resolved, messages
+
 def read_settings_value(key_name: str) -> str | None:
     if not SETTINGS.exists():
         return None
@@ -58,10 +129,15 @@ def main():
     args = ap.parse_args()
 
     metrics_path = Path(args.metrics)
-    spike_path = Path(args.spike_addresses) if args.spike_addresses else None
-
-    if spike_path and not spike_path.exists():
-        sys.exit(f"[error] spike CSV not found: {spike_path}")
+    raw_spike_path = Path(args.spike_addresses) if args.spike_addresses else None
+    spike_path: Path | None = None
+    if raw_spike_path:
+        if not raw_spike_path.exists():
+            sys.exit(f"[error] spike CSV not found: {raw_spike_path}")
+        resolved, logs = _resolve_spike_addresses(raw_spike_path)
+        for line in logs:
+            print(line)
+        spike_path = resolved
 
     # 1) Build metrics if missing
     if not metrics_path.exists():
@@ -71,11 +147,15 @@ def main():
     # 2) Address bubble (size=color off tx count bins)
     label = window_label_from_settings()
     plotA = [PY, str(PLOT_A), "--metrics", str(metrics_path), "--top-labels", str(args.top_labels)]
+    if spike_path:
+        plotA += ["--highlight-addresses", str(spike_path)]
     if label: plotA += ["--window-label", label]
     run(plotA, step="plot address bubble")
 
     # 3) Labeled address bubble (color from settings.csv labels)
     plotB = [PY, str(PLOT_B), "--metrics", str(metrics_path), "--top-labels", str(args.top_labels)]
+    if spike_path:
+        plotB += ["--highlight-addresses", str(spike_path)]
     if label: plotB += ["--window-label", label]
     run(plotB, step="plot labeled address bubble")
 

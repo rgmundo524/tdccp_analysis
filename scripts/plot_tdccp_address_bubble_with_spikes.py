@@ -114,13 +114,51 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return sub
 
 
+def normalize_addresses(addrs: Iterable[str]) -> Set[str]:
+    normalized: Set[str] = set()
+    for addr in addrs:
+        if isinstance(addr, float) and np.isnan(addr):
+            continue
+        addr_str = str(addr).strip()
+        if addr_str:
+            normalized.add(addr_str)
+    return normalized
+
+
+def _resolve_address_column(columns: Iterable[str]) -> Optional[str]:
+    normalized = [(col, (col or "").strip().lower()) for col in columns if col]
+    preferred = [
+        "from_address",
+        "address",
+        "addr",
+        "wallet_address",
+        "wallet",
+        "spike_address",
+        "highlight_address",
+        "account_address",
+        "account",
+    ]
+    for target in preferred:
+        for original, lowered in normalized:
+            if lowered == target:
+                return original
+
+    for original, lowered in normalized:
+        if "address" in lowered and not lowered.startswith("to_"):
+            return original
+    return None
+
+
 def read_highlight_addresses(path: Path) -> Set[str]:
     df = pd.read_csv(path)
-    if "from_address" not in df.columns:
+    column = _resolve_address_column(df.columns)
+    if not column:
+        cols = ", ".join(df.columns)
         raise SystemExit(
-            f"[error] highlight csv missing 'from_address' column: {path}"
+            "[error] highlight csv missing an address column (expected something "
+            f"like 'from_address'). Columns present: {cols}"
         )
-    return set(df["from_address"].astype(str))
+    return normalize_addresses(df[column].astype(str))
 
 
 def parse_figsize(s: str) -> Tuple[float, float]:
