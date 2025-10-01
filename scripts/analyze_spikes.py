@@ -225,6 +225,11 @@ def main():
             buckets_path, index=False
         )
 
+        # write bucket metrics (includes direct & all + routing_heavy_bucket)
+        buckets_path = OUT_DIR / f"spike_buckets_{bucket}_{daterange}.csv"
+        metrics_out.reset_index(drop=False).rename(columns={"index":"bucket"}).to_csv(
+            buckets_path, index=False
+        )
         # addresses & raw swaps for the selected buckets
         addr_top, swaps_out = top_addresses_for_buckets(df, bucket, sel_buckets, args.top_n)
         addr_path  = OUT_DIR / f"spike_addresses_{bucket}_{mode_tag}_{daterange}.csv"
