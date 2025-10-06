@@ -82,6 +82,10 @@ Run:
 python scripts/run_tdccp_pipeline.py
 ```
 
+Fetch balance histories for the addresses you care about before generating
+bubble metrics (see workflow #3), or rely on the bubble metrics step to pull any
+missing histories automatically (it now does so by default).
+
 ### 2. Address transaction bubble chart
 Render a per-transaction bubble chart (with TDCCP price overlay) for a specific wallet:
 
@@ -101,6 +105,19 @@ python scripts/export_tdccp_negative_net_addresses.py \
 ```
 
 The export lands in `outputs/analysis/tdccp_negative_net_addresses.csv` by default and mirrors the address-bubble inputs so you can spotlight organic sell-heavy participants separately from the known airdrop cohort.
+
+To ensure the peaks used in the bubble chart are sourced from Solscan history,
+rebuild the metrics with:
+
+```bash
+python scripts/build_bubble_pipeline.py --debug
+```
+
+The command checks `data/addresses/` for per-address Solscan exports and calls
+`scripts/fetch_address_history.py` for any wallets that are missing files for the
+selected window. Pass `--mint <MINT>` if `settings.csv` does not contain a
+`core,MINT` row. Use `--no-fetch-missing-histories` if you need to skip the
+automatic Solscan fetch and work solely with existing exports.
 
 ### 4. Spike-highlight pressure vs. price plots
 Run the direct-flow spike scanner to emit analysis CSVs and spike-highlight pressure/price plots:

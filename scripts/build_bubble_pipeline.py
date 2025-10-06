@@ -3,17 +3,19 @@ from __future__ import annotations
 
 import argparse
 import csv
+import subprocess
 import sys
 from pathlib import Path
-from typing import Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List, Iterable
 
 import pandas as pd
-import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 SWAPS = DATA / "swaps.csv"
 OUT_DEFAULT = ROOT / "data" / "addresses" / "tdccp_address_metrics.csv"
+BALANCE_HISTORY_DIR = OUT_DEFAULT.parent
+FETCH_HISTORY_SCRIPT = ROOT / "scripts" / "fetch_address_history.py"
 SETTINGS = ROOT / "settings.csv"
 
 
@@ -49,6 +51,10 @@ def default_window_from_settings() -> Tuple[Optional[str], Optional[str]]:
     return _read_settings_value("START"), _read_settings_value("END")
 
 
+def default_mint_from_settings() -> Optional[str]:
+    return _read_settings_value("MINT")
+
+
 # --------------------------- schema helpers ----------------------------
 
 def pick_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
@@ -78,7 +84,263 @@ def ensure_ts(df: pd.DataFrame, time_col: str) -> pd.Series:
 
 # --------------------------- metrics builder ---------------------------
 
-def build_metrics(swaps_path: Path, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+def _format_window_tag(start: pd.Timestamp, end: pd.Timestamp) -> str:
+    def _normalize(ts: pd.Timestamp) -> pd.Timestamp:
+        if ts.tzinfo is None:
+            return ts.tz_localize("UTC")
+        return ts.tz_convert("UTC")
+
+    s = _normalize(start).strftime("%Y%m%dT%H%M")
+    e = _normalize(end).strftime("%Y%m%dT%H%M")
+    return f"{s}-{e}"
+
+
+def _to_fetch_iso(ts: pd.Timestamp) -> str:
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+    return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _ensure_histories(
+    balance_dir: Optional[Path],
+    addresses: Iterable[str],
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    token_mint: str,
+    *,
+    debug: bool = False,
+) -> None:
+    """Fetch Solscan histories for addresses missing CSV exports."""
+
+    if balance_dir is None:
+        raise SystemExit("[error] --fetch-missing-histories requires --balance-history-dir")
+
+    balance_dir.mkdir(parents=True, exist_ok=True)
+
+    window_tag = _format_window_tag(start, end)
+    start_iso = _to_fetch_iso(start)
+    end_iso = _to_fetch_iso(end)
+
+    for addr in sorted({a for a in addresses if a}):
+        history_path = balance_dir / f"{addr}_{window_tag}.csv"
+        tx_path = balance_dir / f"{addr}_{window_tag}_transactions.csv"
+
+        if history_path.exists() and tx_path.exists():
+            continue
+
+        cmd = [
+            sys.executable,
+            str(FETCH_HISTORY_SCRIPT),
+            "--owner",
+            addr,
+            "--token-mint",
+            token_mint,
+            "--start",
+            start_iso,
+            "--end",
+            end_iso,
+            "--skip-existing",
+        ]
+        if debug:
+            print(f"[info] fetching Solscan history for {addr}")
+            cmd.append("--verbose")
+
+        try:
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as exc:
+            raise SystemExit(
+                f"[error] fetch_address_history.py failed for {addr} (exit {exc.returncode})"
+            ) from exc
+
+
+def _extract_peak_from_transactions(
+    path: Path,
+    start_utc: pd.Timestamp,
+    end_utc: pd.Timestamp,
+    *,
+    debug: bool = False,
+) -> Optional[float]:
+    """Return the maximum running peak recorded in the aggregated transaction CSV."""
+
+    try:
+        tx = pd.read_csv(path, low_memory=False)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        if debug:
+            print(f"[warn] failed to read {path}: {exc}")
+        return None
+
+    if tx.empty:
+        return None
+
+    time_col = pick_col(tx, ["first_seen", "block_time", "time", "ts", "block_time_iso"])
+    if not time_col:
+        if debug:
+            print(f"[warn] transaction export lacks timestamp column: {path}")
+        return None
+
+    ts = pd.to_datetime(tx[time_col], utc=True, errors="coerce")
+    tx = tx.loc[pd.notna(ts)].copy()
+    if tx.empty:
+        return None
+
+    tx["__ts"] = ts
+    tx = tx[(tx["__ts"] >= start_utc) & (tx["__ts"] < end_utc)]
+    if tx.empty:
+        return None
+
+    if "running_peak_ui" in tx.columns:
+        series = pd.to_numeric(tx["running_peak_ui"], errors="coerce").dropna()
+        if not series.empty:
+            return float(series.max())
+
+    candidates = []
+    for col in ["running_balance_ui", "post_balance_ui", "pre_balance_ui"]:
+        if col in tx.columns:
+            candidates.append(pd.to_numeric(tx[col], errors="coerce"))
+
+    if not candidates:
+        return None
+
+    combined = pd.concat(candidates, axis=0).dropna()
+    if combined.empty:
+        return None
+
+    return float(combined.max())
+
+
+def _extract_peak_from_history(
+    path: Path,
+    start_utc: pd.Timestamp,
+    end_utc: pd.Timestamp,
+    *,
+    debug: bool = False,
+) -> Optional[float]:
+    """Return the maximum balance observed in the raw Solscan history CSV."""
+
+    try:
+        hist = pd.read_csv(path, low_memory=False)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        if debug:
+            print(f"[warn] failed to read {path}: {exc}")
+        return None
+
+    if hist.empty:
+        return None
+
+    time_col = pick_col(hist, ["time", "ts", "block_time_iso", "block_time", "datetime"])
+    if not time_col:
+        if debug:
+            print(f"[warn] balance history lacks timestamp column: {path}")
+        return None
+
+    ts = pd.to_datetime(hist[time_col], utc=True, errors="coerce")
+    hist = hist.loc[pd.notna(ts)].copy()
+    if hist.empty:
+        return None
+
+    hist["__ts"] = ts
+    hist = hist[(hist["__ts"] >= start_utc) & (hist["__ts"] < end_utc)]
+    if hist.empty:
+        return None
+
+    cols = []
+    if "pre_ui" in hist.columns:
+        cols.append(pd.to_numeric(hist["pre_ui"], errors="coerce"))
+    if "post_ui" in hist.columns:
+        cols.append(pd.to_numeric(hist["post_ui"], errors="coerce"))
+
+    if not cols:
+        return None
+
+    combined = pd.concat(cols, axis=0).dropna()
+    if combined.empty:
+        return None
+
+    return float(combined.max())
+
+
+def _load_balance_peaks(
+    balance_dir: Optional[Path],
+    addresses: Iterable[str],
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    *,
+    debug: bool = False,
+) -> Tuple[Dict[str, float], List[str]]:
+    """Return mapping of address → peak balance (UI) sourced from Solscan history.
+
+    The helper also returns a list of addresses for which we could not find a
+    usable history file so the caller can surface that gap to the analyst. We do
+    **not** fall back to swap-based peaks anymore – the on-chain history is the
+    single source of truth for peak balances.
+    """
+
+    if balance_dir is None:
+        return {}, sorted({a for a in addresses if a})
+
+    if not balance_dir.exists():
+        if debug:
+            print(f"[warn] balance history directory missing: {balance_dir}")
+        return {}, sorted({a for a in addresses if a})
+
+    window_tag = _format_window_tag(start, end)
+    peaks: Dict[str, float] = {}
+    missing: List[str] = []
+
+    # Normalise timestamps once for filtering.
+    start_utc = start.tz_localize("UTC") if start.tzinfo is None else start.tz_convert("UTC")
+    end_utc = end.tz_localize("UTC") if end.tzinfo is None else end.tz_convert("UTC")
+
+    for addr in sorted({a for a in addresses if a}):
+        history_path = balance_dir / f"{addr}_{window_tag}.csv"
+        tx_path = balance_dir / f"{addr}_{window_tag}_transactions.csv"
+
+        peak_val = None
+        if tx_path.exists():
+            peak_val = _extract_peak_from_transactions(
+                tx_path, start_utc, end_utc, debug=debug
+            )
+
+        if peak_val is None and history_path.exists():
+            peak_val = _extract_peak_from_history(
+                history_path, start_utc, end_utc, debug=debug
+            )
+
+        if peak_val is None:
+            if debug:
+                print(
+                    f"[debug] unable to derive peak for {addr}; missing or incomplete Solscan history"
+                )
+            missing.append(addr)
+            continue
+
+        if peak_val < 0:
+            peak_val = 0.0
+
+        peaks[addr] = max(peaks.get(addr, 0.0), peak_val)
+
+    if debug:
+        print(
+            f"[info] loaded balance peaks for {len(peaks)}/{len({a for a in addresses if a})} addresses"
+        )
+        if missing:
+            print(f"[warn] missing balance history for {len(missing)} addresses")
+
+    return peaks, sorted(set(missing))
+
+
+def build_metrics(
+    swaps_path: Path,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    *,
+    balance_dir: Optional[Path] = None,
+    fetch_missing_histories: bool = True,
+    token_mint: Optional[str] = None,
+    debug: bool = False,
+) -> pd.DataFrame:
     if not swaps_path.exists():
         raise SystemExit(f"[error] swaps csv not found: {swaps_path}")
 
@@ -116,6 +378,19 @@ def build_metrics(swaps_path: Path, start: pd.Timestamp, end: pd.Timestamp) -> p
     # normalize needed columns
     window["net_tdccp"] = pd.to_numeric(window["net_tdccp"], errors="coerce").fillna(0.0)
 
+    window["__addr"] = window[addr_col].astype(str).str.strip()
+    window = window[window["__addr"] != ""].copy()
+
+    addresses = window["__addr"].dropna().unique().tolist()
+    if fetch_missing_histories:
+        if not token_mint:
+            raise SystemExit("[error] --fetch-missing-histories requires --mint or settings MINT")
+        _ensure_histories(balance_dir, addresses, start, end, token_mint, debug=debug)
+
+    balance_peaks, missing_history = _load_balance_peaks(
+        balance_dir, addresses, start, end, debug=debug
+    )
+
     # direct vs intermediary
     ilabel = pick_col(window, ["intermediary_label", "route_label", "routing_label"])
     if ilabel is None:
@@ -129,12 +404,12 @@ def build_metrics(swaps_path: Path, start: pd.Timestamp, end: pd.Timestamp) -> p
 
     # group + compute
     out_rows = []
-    for addr, g in window.sort_values("__ts").groupby(window[addr_col]):
+    for addr, g in window.sort_values("__ts").groupby("__addr"):
         net_ui = float(g["net_tdccp"].sum())
 
-        # running balance & peak (within the selected window)
-        bal = g["net_tdccp"].cumsum()
-        peak = float(bal.max()) if len(bal) else 0.0
+        hist_peak = balance_peaks.get(addr)
+        peak_source = "history" if hist_peak is not None else "missing_history"
+        peak = hist_peak if hist_peak is not None else 0.0
 
         n_total = int(len(g))
         n_direct = int(g["__is_direct"].sum())
@@ -148,12 +423,19 @@ def build_metrics(swaps_path: Path, start: pd.Timestamp, end: pd.Timestamp) -> p
             "from_address": addr,
             "net_ui": net_ui,
             "peak_balance_ui": peak,
+            "peak_balance_source": peak_source,
             "first_seen": first_seen.isoformat(),
             "last_seen":  last_seen.isoformat(),
             "direct_txn_count": n_direct,
             "intermediary_txn_count": n_inter,
             "percent_intermediary": round(pct_inter, 6),
         })
+
+    if missing_history and debug:
+        print(
+            "[warn] peak balances defaulted to 0.0 for addresses lacking Solscan history:",
+            ", ".join(missing_history[:10]) + (" …" if len(missing_history) > 10 else ""),
+        )
 
     metrics = pd.DataFrame(out_rows)
     # Stable ordering: larger peak first, then abs(net), then address
@@ -178,6 +460,31 @@ def main():
         "--metrics", default=str(OUT_DEFAULT),
         help=f"Output metrics CSV path (default: {OUT_DEFAULT})"
     )
+    ap.add_argument(
+        "--balance-history-dir",
+        default=str(BALANCE_HISTORY_DIR),
+        help=(
+            "Directory containing per-address balance history CSVs "
+            "(<address>_<start>-<end>.csv). Defaults to data/addresses."
+        ),
+    )
+    ap.add_argument(
+        "--mint",
+        help="Token mint to pass to fetch_address_history.py (defaults to settings MINT).",
+    )
+    ap.add_argument(
+        "--fetch-missing-histories",
+        dest="fetch_missing_histories",
+        action="store_true",
+        help="Automatically call fetch_address_history.py for addresses lacking Solscan exports.",
+    )
+    ap.add_argument(
+        "--no-fetch-missing-histories",
+        dest="fetch_missing_histories",
+        action="store_false",
+        help="Skip calling fetch_address_history.py even if histories are missing.",
+    )
+    ap.set_defaults(fetch_missing_histories=True)
     ap.add_argument("--start", help="ISO start (YYYY-MM-DD). Defaults to settings START.")
     ap.add_argument("--end",   help="ISO end   (YYYY-MM-DD). Defaults to settings END.")
     ap.add_argument("--debug", action="store_true")
@@ -196,14 +503,30 @@ def main():
 
     swaps_path   = Path(args.swaps)
     metrics_path = Path(args.metrics)
+    balance_dir  = Path(args.balance_history_dir) if args.balance_history_dir else None
+    token_mint   = args.mint or default_mint_from_settings()
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
 
     if args.debug:
         print(f"[info] building metrics from {swaps_path}")
         print(f"[info] window {start} → {end}")
+        print(f"[info] balance history dir: {balance_dir}")
+        if args.fetch_missing_histories:
+            print("[info] fetch-missing-histories enabled")
+            print(f"[info] token mint: {token_mint}")
+        else:
+            print("[info] fetch-missing-histories disabled")
         print(f"[info] writing to {metrics_path}")
 
-    m = build_metrics(swaps_path, start, end)
+    m = build_metrics(
+        swaps_path,
+        start,
+        end,
+        balance_dir=balance_dir,
+        fetch_missing_histories=args.fetch_missing_histories,
+        token_mint=token_mint,
+        debug=args.debug,
+    )
     m.to_csv(metrics_path, index=False)
     print(f"[done] metrics → {metrics_path}  (rows={len(m)})")
 
