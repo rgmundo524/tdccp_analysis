@@ -310,13 +310,10 @@ def build_metrics(
     # normalize needed columns
     window["net_tdccp"] = pd.to_numeric(window["net_tdccp"], errors="coerce").fillna(0.0)
 
-    addresses = (
-        window[addr_col]
-        .dropna()
-        .astype(str)
-        .str.strip()
-        .tolist()
-    )
+    window["__addr"] = window[addr_col].astype(str).str.strip()
+    window = window[window["__addr"] != ""].copy()
+
+    addresses = window["__addr"].dropna().unique().tolist()
     balance_peaks, missing_history = _load_balance_peaks(
         balance_dir, addresses, start, end, debug=debug
     )
@@ -334,7 +331,7 @@ def build_metrics(
 
     # group + compute
     out_rows = []
-    for addr, g in window.sort_values("__ts").groupby(window[addr_col]):
+    for addr, g in window.sort_values("__ts").groupby("__addr"):
         net_ui = float(g["net_tdccp"].sum())
 
         hist_peak = balance_peaks.get(addr)
