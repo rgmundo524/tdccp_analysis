@@ -5,15 +5,15 @@ import argparse
 import csv
 import sys
 from pathlib import Path
-from typing import Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List, Iterable
 
 import pandas as pd
-import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 SWAPS = DATA / "swaps.csv"
 OUT_DEFAULT = ROOT / "data" / "addresses" / "tdccp_address_metrics.csv"
+BALANCE_HISTORY_DIR = OUT_DEFAULT.parent
 SETTINGS = ROOT / "settings.csv"
 
 
@@ -78,7 +78,114 @@ def ensure_ts(df: pd.DataFrame, time_col: str) -> pd.Series:
 
 # --------------------------- metrics builder ---------------------------
 
-def build_metrics(swaps_path: Path, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+def _format_window_tag(start: pd.Timestamp, end: pd.Timestamp) -> str:
+    def _normalize(ts: pd.Timestamp) -> pd.Timestamp:
+        if ts.tzinfo is None:
+            return ts.tz_localize("UTC")
+        return ts.tz_convert("UTC")
+
+    s = _normalize(start).strftime("%Y%m%dT%H%M")
+    e = _normalize(end).strftime("%Y%m%dT%H%M")
+    return f"{s}-{e}"
+
+
+def _load_balance_peaks(
+    balance_dir: Optional[Path],
+    addresses: Iterable[str],
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    *,
+    debug: bool = False,
+) -> Dict[str, float]:
+    """Return a mapping of address -> peak balance (UI) from balance history files."""
+
+    if balance_dir is None:
+        return {}
+
+    if not balance_dir.exists():
+        if debug:
+            print(f"[warn] balance history directory missing: {balance_dir}")
+        return {}
+
+    window_tag = _format_window_tag(start, end)
+    peaks: Dict[str, float] = {}
+
+    # Normalise timestamps once for filtering.
+    start_utc = start.tz_localize("UTC") if start.tzinfo is None else start.tz_convert("UTC")
+    end_utc = end.tz_localize("UTC") if end.tzinfo is None else end.tz_convert("UTC")
+
+    time_candidates = ["time", "ts", "block_time_iso", "block_time", "datetime"]
+
+    for addr in sorted({a for a in addresses if a}):
+        history_path = balance_dir / f"{addr}_{window_tag}.csv"
+        if not history_path.exists():
+            if debug:
+                print(f"[debug] balance history missing for {addr}: {history_path}")
+            continue
+
+        try:
+            hist = pd.read_csv(history_path, low_memory=False)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            if debug:
+                print(f"[warn] failed to read {history_path}: {exc}")
+            continue
+
+        if hist.empty:
+            continue
+
+        time_col = pick_col(hist, time_candidates)
+        if not time_col:
+            if debug:
+                print(f"[warn] balance history lacks timestamp column: {history_path}")
+            continue
+
+        ts = pd.to_datetime(hist[time_col], utc=True, errors="coerce")
+        hist = hist.loc[pd.notna(ts)].copy()
+        if hist.empty:
+            continue
+
+        hist["__ts"] = ts
+        hist = hist[(hist["__ts"] >= start_utc) & (hist["__ts"] < end_utc)]
+        if hist.empty:
+            continue
+
+        cols = []
+        if "pre_ui" in hist.columns:
+            cols.append(pd.to_numeric(hist["pre_ui"], errors="coerce"))
+        if "post_ui" in hist.columns:
+            cols.append(pd.to_numeric(hist["post_ui"], errors="coerce"))
+
+        if not cols:
+            if debug:
+                print(f"[warn] balance history missing pre_ui/post_ui columns: {history_path}")
+            continue
+
+        combined = pd.concat(cols, axis=0).dropna()
+        if combined.empty:
+            continue
+
+        peak_val = float(combined.max())
+        if peak_val < 0:
+            peak_val = 0.0
+
+        peaks[addr] = max(peaks.get(addr, 0.0), peak_val)
+
+    if debug:
+        print(
+            f"[info] loaded balance peaks for {len(peaks)}/{len({a for a in addresses if a})} addresses"
+        )
+
+    return peaks
+
+
+def build_metrics(
+    swaps_path: Path,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    *,
+    balance_dir: Optional[Path] = None,
+    debug: bool = False,
+) -> pd.DataFrame:
     if not swaps_path.exists():
         raise SystemExit(f"[error] swaps csv not found: {swaps_path}")
 
@@ -116,6 +223,15 @@ def build_metrics(swaps_path: Path, start: pd.Timestamp, end: pd.Timestamp) -> p
     # normalize needed columns
     window["net_tdccp"] = pd.to_numeric(window["net_tdccp"], errors="coerce").fillna(0.0)
 
+    addresses = (
+        window[addr_col]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .tolist()
+    )
+    balance_peaks = _load_balance_peaks(balance_dir, addresses, start, end, debug=debug)
+
     # direct vs intermediary
     ilabel = pick_col(window, ["intermediary_label", "route_label", "routing_label"])
     if ilabel is None:
@@ -134,7 +250,17 @@ def build_metrics(swaps_path: Path, start: pd.Timestamp, end: pd.Timestamp) -> p
 
         # running balance & peak (within the selected window)
         bal = g["net_tdccp"].cumsum()
-        peak = float(bal.max()) if len(bal) else 0.0
+        peak_from_swaps = float(bal.max()) if len(bal) else 0.0
+        peak_from_swaps = max(0.0, peak_from_swaps)
+
+        peak = peak_from_swaps
+        peak_source = "swaps"
+
+        hist_peak = balance_peaks.get(addr)
+        if hist_peak is not None:
+            if hist_peak >= peak:
+                peak = hist_peak
+                peak_source = "history"
 
         n_total = int(len(g))
         n_direct = int(g["__is_direct"].sum())
@@ -148,6 +274,7 @@ def build_metrics(swaps_path: Path, start: pd.Timestamp, end: pd.Timestamp) -> p
             "from_address": addr,
             "net_ui": net_ui,
             "peak_balance_ui": peak,
+            "peak_balance_source": peak_source,
             "first_seen": first_seen.isoformat(),
             "last_seen":  last_seen.isoformat(),
             "direct_txn_count": n_direct,
@@ -178,6 +305,14 @@ def main():
         "--metrics", default=str(OUT_DEFAULT),
         help=f"Output metrics CSV path (default: {OUT_DEFAULT})"
     )
+    ap.add_argument(
+        "--balance-history-dir",
+        default=str(BALANCE_HISTORY_DIR),
+        help=(
+            "Directory containing per-address balance history CSVs "
+            "(<address>_<start>-<end>.csv). Defaults to data/addresses."
+        ),
+    )
     ap.add_argument("--start", help="ISO start (YYYY-MM-DD). Defaults to settings START.")
     ap.add_argument("--end",   help="ISO end   (YYYY-MM-DD). Defaults to settings END.")
     ap.add_argument("--debug", action="store_true")
@@ -196,14 +331,16 @@ def main():
 
     swaps_path   = Path(args.swaps)
     metrics_path = Path(args.metrics)
+    balance_dir  = Path(args.balance_history_dir) if args.balance_history_dir else None
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
 
     if args.debug:
         print(f"[info] building metrics from {swaps_path}")
         print(f"[info] window {start} → {end}")
+        print(f"[info] balance history dir: {balance_dir}")
         print(f"[info] writing to {metrics_path}")
 
-    m = build_metrics(swaps_path, start, end)
+    m = build_metrics(swaps_path, start, end, balance_dir=balance_dir, debug=args.debug)
     m.to_csv(metrics_path, index=False)
     print(f"[done] metrics → {metrics_path}  (rows={len(m)})")
 
