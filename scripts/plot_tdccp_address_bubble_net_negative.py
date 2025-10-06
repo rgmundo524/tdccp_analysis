@@ -30,25 +30,11 @@ from plot_tdccp_address_bubble_by_label import (  # noqa: E402
     settings_window,
 )
 
-ROOT = SCRIPT_DIR.parents[1]
-DATA_ROOT = ROOT / "data"
+ROOT = SCRIPT_DIR.parent
 
 
-def pick_default_path(candidates: Sequence[Path]) -> Path:
-    """Return the first existing path from *candidates* or the first entry."""
-
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return candidates[0]
-
-
-DEFAULT_METRICS = pick_default_path(
-    [
-        DATA_ROOT / "addresses" / "tdccp_address_metrics.csv",
-        DATA_ROOT / "tdccp_analysis" / "addresses" / "tdccp_address_metrics.csv",
-        SCRIPT_DIR.parent / "data" / "tdccp_address_metrics.csv",
-    ]
+DEFAULT_METRICS = Path(
+    "/home/moondough/Projects/tdccp_analysis/data/addresses/tdccp_address_metrics.csv"
 )
 DEFAULT_NEGATIVE = ROOT / "outputs" / "analysis" / "tdccp_negative_net_addresses.csv"
 OUT_DIR = ROOT / "outputs" / "figures"
