@@ -81,11 +81,42 @@ def defaults_from_settings() -> tuple[Optional[str], Optional[str]]:
     # Only these two are read from settings.csv
     return read_settings_value("START"), read_settings_value("END")
 
+def _load_env_file(path: Path) -> Dict[str, str]:
+    """Minimal .env parser so the CLI can fall back to repo-local credentials."""
+
+    if not path.exists():
+        return {}
+
+    values: Dict[str, str] = {}
+    with path.open("r", encoding="utf-8") as fh:
+        for raw_line in fh:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            key = key.strip()
+            val = val.strip()
+            if not key:
+                continue
+            values[key] = val
+    return values
+
+
 def require_api_key() -> str:
     key = os.environ.get("SOLSCAN_API_KEY", "").strip()
     if not key:
-        sys.exit("[error] SOLSCAN_API_KEY not found in environment (.env). "
-                 "Export it or add to your shell env before running.")
+        env_path = ROOT / ".env"
+        env_vars = _load_env_file(env_path)
+        key = env_vars.get("SOLSCAN_API_KEY", "").strip()
+        if key:
+            # Populate os.environ so any downstream helpers can reuse it.
+            os.environ.setdefault("SOLSCAN_API_KEY", key)
+    if not key:
+        sys.exit(
+            "[error] SOLSCAN_API_KEY not found. Export it or add it to .env at the repo root."
+        )
     return key
 
 def http_get_json(url: str, headers: Dict[str, str], params: Dict[str, Any], retries: int = 3, backoff: float = 0.7) -> Dict[str, Any]:
