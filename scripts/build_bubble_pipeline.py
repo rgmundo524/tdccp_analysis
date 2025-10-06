@@ -5,6 +5,7 @@ import argparse
 import csv
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List, Iterable
 
@@ -111,6 +112,7 @@ def _ensure_histories(
     token_mint: str,
     *,
     debug: bool = False,
+    max_workers: int = 8,
 ) -> None:
     """Fetch Solscan histories for addresses missing CSV exports."""
 
@@ -123,6 +125,7 @@ def _ensure_histories(
     start_iso = _to_fetch_iso(start)
     end_iso = _to_fetch_iso(end)
 
+    to_fetch: List[str] = []
     for addr in sorted({a for a in addresses if a}):
         history_path = balance_dir / f"{addr}_{window_tag}.csv"
         tx_path = balance_dir / f"{addr}_{window_tag}_transactions.csv"
@@ -130,6 +133,20 @@ def _ensure_histories(
         if history_path.exists() and tx_path.exists():
             continue
 
+        to_fetch.append(addr)
+
+    if not to_fetch:
+        return
+
+    max_workers = max(1, min(max_workers, len(to_fetch)))
+
+    if debug:
+        print(
+            f"[info] fetching Solscan history for {len(to_fetch)} address(es) "
+            f"with up to {max_workers} concurrent worker(s)"
+        )
+
+    def _run(addr: str) -> str:
         cmd = [
             sys.executable,
             str(FETCH_HISTORY_SCRIPT),
@@ -144,7 +161,6 @@ def _ensure_histories(
             "--skip-existing",
         ]
         if debug:
-            print(f"[info] fetching Solscan history for {addr}")
             cmd.append("--verbose")
 
         try:
@@ -153,6 +169,19 @@ def _ensure_histories(
             raise SystemExit(
                 f"[error] fetch_address_history.py failed for {addr} (exit {exc.returncode})"
             ) from exc
+        return addr
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_run, addr): addr for addr in to_fetch}
+        for future in as_completed(futures):
+            addr = futures[future]
+            try:
+                future.result()
+            except Exception:
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
+            if debug:
+                print(f"[info] fetched Solscan history for {addr}")
 
 
 def _extract_peak_from_transactions(
@@ -338,6 +367,7 @@ def build_metrics(
     *,
     balance_dir: Optional[Path] = None,
     fetch_missing_histories: bool = True,
+    fetch_workers: int = 8,
     token_mint: Optional[str] = None,
     debug: bool = False,
 ) -> pd.DataFrame:
@@ -385,7 +415,15 @@ def build_metrics(
     if fetch_missing_histories:
         if not token_mint:
             raise SystemExit("[error] --fetch-missing-histories requires --mint or settings MINT")
-        _ensure_histories(balance_dir, addresses, start, end, token_mint, debug=debug)
+        _ensure_histories(
+            balance_dir,
+            addresses,
+            start,
+            end,
+            token_mint,
+            debug=debug,
+            max_workers=fetch_workers,
+        )
 
     balance_peaks, missing_history = _load_balance_peaks(
         balance_dir, addresses, start, end, debug=debug
@@ -485,6 +523,12 @@ def main():
         help="Skip calling fetch_address_history.py even if histories are missing.",
     )
     ap.set_defaults(fetch_missing_histories=True)
+    ap.add_argument(
+        "--fetch-workers",
+        type=int,
+        default=8,
+        help="Maximum concurrent Solscan history fetches (default: 8).",
+    )
     ap.add_argument("--start", help="ISO start (YYYY-MM-DD). Defaults to settings START.")
     ap.add_argument("--end",   help="ISO end   (YYYY-MM-DD). Defaults to settings END.")
     ap.add_argument("--debug", action="store_true")
@@ -514,6 +558,7 @@ def main():
         if args.fetch_missing_histories:
             print("[info] fetch-missing-histories enabled")
             print(f"[info] token mint: {token_mint}")
+            print(f"[info] fetch workers: {max(1, args.fetch_workers)}")
         else:
             print("[info] fetch-missing-histories disabled")
         print(f"[info] writing to {metrics_path}")
@@ -524,6 +569,7 @@ def main():
         end,
         balance_dir=balance_dir,
         fetch_missing_histories=args.fetch_missing_histories,
+        fetch_workers=max(1, args.fetch_workers),
         token_mint=token_mint,
         debug=args.debug,
     )

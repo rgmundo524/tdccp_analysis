@@ -117,7 +117,12 @@ The command checks `data/addresses/` for per-address Solscan exports and calls
 `scripts/fetch_address_history.py` for any wallets that are missing files for the
 selected window. Pass `--mint <MINT>` if `settings.csv` does not contain a
 `core,MINT` row. Use `--no-fetch-missing-histories` if you need to skip the
-automatic Solscan fetch and work solely with existing exports.
+automatic Solscan fetch and work solely with existing exports. Adjust
+`--fetch-workers <N>` (default `8`) to parallelise the Solscan calls when you
+have enough rate-limit headroom. The helper automatically retries any Solscan
+request that bounces with a rate-limit response, using exponential back-off and
+the API's `Retry-After` hints so the history export completes without manual
+intervention.
 
 ### 4. Spike-highlight pressure vs. price plots
 Run the direct-flow spike scanner to emit analysis CSVs and spike-highlight pressure/price plots:

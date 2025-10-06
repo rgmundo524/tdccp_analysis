@@ -7,12 +7,15 @@ import math
 import os
 import sys
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 import numpy as np
 import pandas as pd
 import requests
+from requests import RequestException
 
 # ---------------- paths ----------------
 ROOT = Path(__file__).resolve().parents[1]
@@ -119,23 +122,93 @@ def require_api_key() -> str:
         )
     return key
 
-def http_get_json(url: str, headers: Dict[str, str], params: Dict[str, Any], retries: int = 3, backoff: float = 0.7) -> Dict[str, Any]:
+def _retry_after_seconds(headers: Dict[str, str]) -> Optional[float]:
+    raw = headers.get("Retry-After")
+    if not raw:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        try:
+            dt = parsedate_to_datetime(raw)
+        except Exception:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        return max(0.0, (dt - now).total_seconds())
+
+
+def _payload_indicates_rate_limit(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    code = str(payload.get("code", "")).strip().lower()
+    if code in {"429", "too_many_requests", "rate_limit"}:
+        return True
+    message = str(payload.get("message", "")).strip().lower()
+    if "rate" in message and "limit" in message:
+        return True
+    return False
+
+
+def http_get_json(
+    url: str,
+    headers: Dict[str, str],
+    params: Dict[str, Any],
+    retries: int = 6,
+    backoff: float = 0.7,
+    max_backoff: float = 5.0,
+) -> Dict[str, Any]:
     last = None
-    for attempt in range(retries):
-        r = requests.get(url, headers=headers, params=params, timeout=30)
-        if r.status_code == 200:
-            try:
-                data = r.json()
-            except Exception as e:
-                last = f"invalid JSON: {e}"
-                time.sleep(backoff)
-                continue
-            if isinstance(data, dict) and data.get("success", False):
-                return data
-            last = f"API error payload: {data}"
+    attempt = 1
+    delay = backoff
+    while attempt <= retries:
+        slept = False
+        try:
+            r = requests.get(url, headers=headers, params=params, timeout=30)
+        except RequestException as exc:
+            last = f"network error: {exc}"
         else:
-            last = f"HTTP {r.status_code}: {r.text}"
-        time.sleep(backoff)
+            status = r.status_code
+            if status == 200:
+                try:
+                    data = r.json()
+                except Exception as exc:
+                    last = f"invalid JSON: {exc}"
+                else:
+                    if isinstance(data, dict) and data.get("success", False):
+                        return data
+                    if _payload_indicates_rate_limit(data):
+                        wait_hint = _retry_after_seconds(r.headers)
+                        wait_time = max(delay, wait_hint or 0.0)
+                        time.sleep(wait_time)
+                        slept = True
+                        last = f"API rate limited payload: {data}"
+                    else:
+                        last = f"API error payload: {data}"
+            elif status == 429:
+                wait_hint = _retry_after_seconds(r.headers)
+                wait_time = max(delay, wait_hint or 0.0)
+                time.sleep(wait_time)
+                slept = True
+                last = f"HTTP 429: {r.text.strip()}"
+            elif 500 <= status < 600:
+                last = f"HTTP {status}: {r.text.strip()}"
+            else:
+                last = f"HTTP {status}: {r.text.strip()}"
+
+        if attempt == retries:
+            break
+
+        if not slept:
+            time.sleep(delay)
+
+        delay = min(delay * 2, max_backoff)
+        attempt += 1
+
     raise RuntimeError(last or "HTTP/request failed")
 
 # ---------------- Solscan fetchers ----------------

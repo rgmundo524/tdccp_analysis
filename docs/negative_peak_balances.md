@@ -53,7 +53,12 @@ python scripts/build_bubble_pipeline.py --debug
 ```
 
 Use `--no-fetch-missing-histories` if you already have the exports you need and
-want to avoid the Solscan API calls.
+want to avoid the Solscan API calls. When you do need to fetch, the
+`--fetch-workers` flag lets you parallelise the Solscan requests (default `8`
+concurrent workers). Increase it to take advantage of higher rate limits. The
+fetcher automatically retries calls that hit Solscan's rate limit, honouring any
+`Retry-After` hints and backing off between attempts so long-running exports can
+finish without manual babysitting.
 
 To manually verify a peak that was sourced from history, open the corresponding
 CSV and check the highest `pre_ui`/`post_ui` value within the window—the metrics
