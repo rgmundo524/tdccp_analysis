@@ -42,6 +42,19 @@ python scripts/build_bubble_pipeline.py --debug
 
 Replace `<TDCCP_MINT>` with the mint listed under `core,MINT` in `settings.csv`.
 
+If you have many addresses to reconcile, `scripts/build_bubble_pipeline.py` can
+orchestrate the fetch step for you. By default it now calls
+`fetch_address_history.py` for every address that lacks a Solscan export for the
+selected window (pass `--mint <MINT>` if the settings file does not include the
+TDCCP mint):
+
+```bash
+python scripts/build_bubble_pipeline.py --debug
+```
+
+Use `--no-fetch-missing-histories` if you already have the exports you need and
+want to avoid the Solscan API calls.
+
 To manually verify a peak that was sourced from history, open the corresponding
 CSV and check the highest `pre_ui`/`post_ui` value within the window—the metrics
 CSV will match that number. If the `peak_balance_source` says `missing_history`,

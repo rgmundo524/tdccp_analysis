@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import subprocess
 import sys
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List, Iterable
@@ -14,6 +15,7 @@ DATA = ROOT / "data"
 SWAPS = DATA / "swaps.csv"
 OUT_DEFAULT = ROOT / "data" / "addresses" / "tdccp_address_metrics.csv"
 BALANCE_HISTORY_DIR = OUT_DEFAULT.parent
+FETCH_HISTORY_SCRIPT = ROOT / "scripts" / "fetch_address_history.py"
 SETTINGS = ROOT / "settings.csv"
 
 
@@ -47,6 +49,10 @@ def _read_settings_value(key_name: str) -> Optional[str]:
 
 def default_window_from_settings() -> Tuple[Optional[str], Optional[str]]:
     return _read_settings_value("START"), _read_settings_value("END")
+
+
+def default_mint_from_settings() -> Optional[str]:
+    return _read_settings_value("MINT")
 
 
 # --------------------------- schema helpers ----------------------------
@@ -87,6 +93,66 @@ def _format_window_tag(start: pd.Timestamp, end: pd.Timestamp) -> str:
     s = _normalize(start).strftime("%Y%m%dT%H%M")
     e = _normalize(end).strftime("%Y%m%dT%H%M")
     return f"{s}-{e}"
+
+
+def _to_fetch_iso(ts: pd.Timestamp) -> str:
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+    return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _ensure_histories(
+    balance_dir: Optional[Path],
+    addresses: Iterable[str],
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    token_mint: str,
+    *,
+    debug: bool = False,
+) -> None:
+    """Fetch Solscan histories for addresses missing CSV exports."""
+
+    if balance_dir is None:
+        raise SystemExit("[error] --fetch-missing-histories requires --balance-history-dir")
+
+    balance_dir.mkdir(parents=True, exist_ok=True)
+
+    window_tag = _format_window_tag(start, end)
+    start_iso = _to_fetch_iso(start)
+    end_iso = _to_fetch_iso(end)
+
+    for addr in sorted({a for a in addresses if a}):
+        history_path = balance_dir / f"{addr}_{window_tag}.csv"
+        tx_path = balance_dir / f"{addr}_{window_tag}_transactions.csv"
+
+        if history_path.exists() and tx_path.exists():
+            continue
+
+        cmd = [
+            sys.executable,
+            str(FETCH_HISTORY_SCRIPT),
+            "--owner",
+            addr,
+            "--token-mint",
+            token_mint,
+            "--start",
+            start_iso,
+            "--end",
+            end_iso,
+            "--skip-existing",
+        ]
+        if debug:
+            print(f"[info] fetching Solscan history for {addr}")
+            cmd.append("--verbose")
+
+        try:
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as exc:
+            raise SystemExit(
+                f"[error] fetch_address_history.py failed for {addr} (exit {exc.returncode})"
+            ) from exc
 
 
 def _extract_peak_from_transactions(
@@ -271,6 +337,8 @@ def build_metrics(
     end: pd.Timestamp,
     *,
     balance_dir: Optional[Path] = None,
+    fetch_missing_histories: bool = True,
+    token_mint: Optional[str] = None,
     debug: bool = False,
 ) -> pd.DataFrame:
     if not swaps_path.exists():
@@ -314,6 +382,11 @@ def build_metrics(
     window = window[window["__addr"] != ""].copy()
 
     addresses = window["__addr"].dropna().unique().tolist()
+    if fetch_missing_histories:
+        if not token_mint:
+            raise SystemExit("[error] --fetch-missing-histories requires --mint or settings MINT")
+        _ensure_histories(balance_dir, addresses, start, end, token_mint, debug=debug)
+
     balance_peaks, missing_history = _load_balance_peaks(
         balance_dir, addresses, start, end, debug=debug
     )
@@ -395,6 +468,23 @@ def main():
             "(<address>_<start>-<end>.csv). Defaults to data/addresses."
         ),
     )
+    ap.add_argument(
+        "--mint",
+        help="Token mint to pass to fetch_address_history.py (defaults to settings MINT).",
+    )
+    ap.add_argument(
+        "--fetch-missing-histories",
+        dest="fetch_missing_histories",
+        action="store_true",
+        help="Automatically call fetch_address_history.py for addresses lacking Solscan exports.",
+    )
+    ap.add_argument(
+        "--no-fetch-missing-histories",
+        dest="fetch_missing_histories",
+        action="store_false",
+        help="Skip calling fetch_address_history.py even if histories are missing.",
+    )
+    ap.set_defaults(fetch_missing_histories=True)
     ap.add_argument("--start", help="ISO start (YYYY-MM-DD). Defaults to settings START.")
     ap.add_argument("--end",   help="ISO end   (YYYY-MM-DD). Defaults to settings END.")
     ap.add_argument("--debug", action="store_true")
@@ -414,15 +504,29 @@ def main():
     swaps_path   = Path(args.swaps)
     metrics_path = Path(args.metrics)
     balance_dir  = Path(args.balance_history_dir) if args.balance_history_dir else None
+    token_mint   = args.mint or default_mint_from_settings()
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
 
     if args.debug:
         print(f"[info] building metrics from {swaps_path}")
         print(f"[info] window {start} → {end}")
         print(f"[info] balance history dir: {balance_dir}")
+        if args.fetch_missing_histories:
+            print("[info] fetch-missing-histories enabled")
+            print(f"[info] token mint: {token_mint}")
+        else:
+            print("[info] fetch-missing-histories disabled")
         print(f"[info] writing to {metrics_path}")
 
-    m = build_metrics(swaps_path, start, end, balance_dir=balance_dir, debug=args.debug)
+    m = build_metrics(
+        swaps_path,
+        start,
+        end,
+        balance_dir=balance_dir,
+        fetch_missing_histories=args.fetch_missing_histories,
+        token_mint=token_mint,
+        debug=args.debug,
+    )
     m.to_csv(metrics_path, index=False)
     print(f"[done] metrics → {metrics_path}  (rows={len(m)})")
 
