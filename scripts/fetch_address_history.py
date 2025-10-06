@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import os
 import sys
 import time
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
+import numpy as np
 import pandas as pd
 import requests
 
@@ -16,6 +18,23 @@ import requests
 ROOT = Path(__file__).resolve().parents[1]
 SETTINGS_CSV = ROOT / "settings.csv"
 OUT_ROOT = ROOT / "data" / "addresses"
+
+# Column layout for the aggregated transaction export. Keeping it explicit helps
+# downstream tooling (and analysts) understand exactly which fields are
+# available for running-balance reconstruction.
+AGGREGATED_COLUMNS = [
+    "trans_id",
+    "first_seen",
+    "block_time",
+    "net_amount_ui",
+    "abs_amount_ui",
+    "direction",
+    "token_accounts",
+    "pre_balance_ui",
+    "post_balance_ui",
+    "running_balance_ui",
+    "running_peak_ui",
+]
 
 SOLSCAN_BASE = "https://pro-api.solscan.io/v2.0"
 
@@ -202,6 +221,126 @@ def fetch_balance_changes(
 
     return df
 
+
+def _aggregate_transactions(hist: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate raw balance changes into per-transaction flows.
+
+    The bubble chart (and forensic workflows) need one row per transaction with
+    enough information to rebuild running balances. We therefore keep:
+
+    * the net signed TDCCP delta ("net_amount_ui")
+    * an absolute magnitude helper ("abs_amount_ui")
+    * the direction (inc/dec/flat)
+    * the set of token accounts touched
+    * total balances immediately before and after the transaction, whenever the
+      Solscan payload provides ``pre_balance``/``post_balance``
+    """
+
+    if hist.empty:
+        return pd.DataFrame(columns=AGGREGATED_COLUMNS)
+
+    work = hist.copy()
+    work["trans_id"] = work["trans_id"].astype(str)
+    work["time_iso"] = pd.to_datetime(work.get("time"), utc=True, errors="coerce")
+    work = work.dropna(subset=["trans_id", "time_iso"])
+    if work.empty:
+        return pd.DataFrame(columns=AGGREGATED_COLUMNS)
+
+    work["direction"] = work.get("change_type", "").astype(str).str.lower()
+    work["amount_ui"] = pd.to_numeric(work.get("amount_ui"), errors="coerce").fillna(0.0)
+    work["pre_ui"] = pd.to_numeric(work.get("pre_ui"), errors="coerce")
+    work["post_ui"] = pd.to_numeric(work.get("post_ui"), errors="coerce")
+    work["signed_amount_ui"] = np.where(
+        work["direction"] == "inc",
+        work["amount_ui"],
+        -work["amount_ui"],
+    )
+    work["token_account"] = work.get("token_account", "").astype(str)
+
+    grouped = work.groupby("trans_id", sort=False)
+    records: List[Dict[str, Any]] = []
+    for tx, grp in grouped:
+        ts = grp["time_iso"].min()
+        block_time = pd.to_numeric(grp.get("block_time"), errors="coerce").min()
+        net = float(grp["signed_amount_ui"].sum())
+        direction = "inc" if net > 0 else "dec" if net < 0 else "flat"
+        accounts = sorted({acc for acc in grp["token_account"] if acc and acc.lower() != "nan"})
+
+        pre_vals = grp["pre_ui"].dropna()
+        post_vals = grp["post_ui"].dropna()
+        pre_total = float(pre_vals.sum()) if not pre_vals.empty else math.nan
+        post_total = float(post_vals.sum()) if not post_vals.empty else math.nan
+
+        records.append({
+            "trans_id": tx,
+            "first_seen": ts,
+            "block_time": block_time,
+            "net_amount_ui": net,
+            "abs_amount_ui": abs(net),
+            "direction": direction,
+            "token_accounts": ";".join(accounts),
+            "pre_balance_ui": pre_total,
+            "post_balance_ui": post_total,
+        })
+
+    agg = pd.DataFrame.from_records(records)
+    if agg.empty:
+        return pd.DataFrame(columns=AGGREGATED_COLUMNS)
+
+    agg = agg.dropna(subset=["first_seen"]).sort_values(["first_seen", "trans_id"])
+    agg["first_seen"] = pd.to_datetime(agg["first_seen"], utc=True)
+
+    running_balances: List[float] = []
+    peak_balances: List[float] = []
+    current = math.nan
+    peak = math.nan
+
+    for _, row in agg.iterrows():
+        pre = row.get("pre_balance_ui")
+        post = row.get("post_balance_ui")
+        delta = float(row.get("net_amount_ui", 0.0))
+
+        # `before` represents the balance immediately preceding the change. If
+        # Solscan supplies a `pre_balance_ui`, trust it; otherwise carry forward
+        # the last known balance (initialising at 0 when nothing is known yet).
+        if not math.isnan(pre):
+            before = float(pre)
+        else:
+            if math.isnan(current):
+                current = 0.0
+            before = float(current)
+
+        # Apply the net change to derive the post-transaction balance. When the
+        # payload includes an explicit `post_balance_ui`, prefer that since it
+        # reflects the authoritative account state after the transaction.
+        after = before + delta
+        if not math.isnan(post):
+            after = float(post)
+
+        current = after
+        running_balances.append(current)
+
+        candidates = [val for val in (before, after) if not math.isnan(val)]
+        if not candidates:
+            candidates = [0.0]
+        max_candidate = max(candidates)
+        if math.isnan(peak):
+            peak = max_candidate
+        else:
+            peak = max(peak, max_candidate)
+        peak_balances.append(peak)
+
+    agg["running_balance_ui"] = running_balances
+    agg["running_peak_ui"] = peak_balances
+
+    # ensure column order
+    for col in AGGREGATED_COLUMNS:
+        if col not in agg.columns:
+            agg[col] = math.nan
+    agg = agg[AGGREGATED_COLUMNS]
+
+    return agg
+
 # ---------------- main ----------------
 def main():
     ap = argparse.ArgumentParser(
@@ -256,11 +395,15 @@ def main():
             "amount_ui","pre_ui","post_ui","owner"
         ]
         pd.DataFrame(columns=empty_cols).to_csv(hist_csv, index=False)
+        tx_csv = OUT_ROOT / f"{owner}_{window_tag}_transactions.csv"
+        pd.DataFrame(columns=AGGREGATED_COLUMNS).to_csv(tx_csv, index=False)
         if args.verbose:
             print(f"[info] no token accounts for mint on this owner → {owner}")
             print(f"[done] balance history → {hist_csv}  (rows=0)")
+            print(f"[done] transactions     → {tx_csv} (rows=0)")
         else:
             print(f"[done] balance history → {hist_csv}  (rows=0)")
+            print(f"[done] transactions     → {tx_csv} (rows=0)")
         return
 
     # 2) balance changes across all token accounts for this mint
@@ -282,6 +425,11 @@ def main():
 
     hist.to_csv(hist_csv, index=False)
     print(f"[done] balance history → {hist_csv}  (rows={len(hist)})")
+
+    tx_csv = OUT_ROOT / f"{owner}_{window_tag}_transactions.csv"
+    tx_df = _aggregate_transactions(hist)
+    tx_df.to_csv(tx_csv, index=False)
+    print(f"[done] transactions     → {tx_csv} (rows={len(tx_df)})")
 
 if __name__ == "__main__":
     main()
