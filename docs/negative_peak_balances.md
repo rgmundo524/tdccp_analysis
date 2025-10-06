@@ -16,11 +16,21 @@ maximum `pre_ui`/`post_ui` observed during the analysis window, so it always
 reflects the true highest balance the owner held—even if every swap in the
 window was an outflow.
 
-Each metrics row now carries a helper column, `peak_balance_source`, so you can
-see whether the peak originated from the balance history (`history`) or from the
-swap-derived running total (`swaps`). If you spot a row using the fallback, run
-`fetch_address_history.py` for that wallet and re-run the bubble pipeline so the
-next build can source the peak from the richer dataset:
+Each metrics row now carries a helper column, `peak_balance_source`, which is
+`history` when Solscan data was available and `missing_history` when the
+analysis had to fall back to `0.0` because no balance history file existed for
+that address/window. There is **no** swap-derived fallback anymore; fetch the
+history, rerun the pipeline, and the peak will automatically be sourced from the
+on-chain balance changes. The fetcher writes two artefacts per address/window:
+
+* `<owner>_<start>-<end>.csv` — raw Solscan balance-change rows (with
+  `pre_ui`/`post_ui`).
+* `<owner>_<start>-<end>_transactions.csv` — one row per TDCCP transaction with
+  the signed `net_amount_ui`, the reconstructed running balance, and a
+  cumulative peak column you can compare directly to the bubble chart's running
+  sums.
+
+Run it like this:
 
 ```bash
 python scripts/fetch_address_history.py \
@@ -34,6 +44,6 @@ Replace `<TDCCP_MINT>` with the mint listed under `core,MINT` in `settings.csv`.
 
 To manually verify a peak that was sourced from history, open the corresponding
 CSV and check the highest `pre_ui`/`post_ui` value within the window—the metrics
-CSV will match that number. If the `peak_balance_source` says `swaps`, the
-address simply lacks a fetched balance history; fetching it will upgrade the
+CSV will match that number. If the `peak_balance_source` says `missing_history`,
+the address simply lacks a fetched balance history; fetching it will upgrade the
 metrics on the next run.

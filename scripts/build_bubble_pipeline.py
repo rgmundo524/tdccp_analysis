@@ -89,6 +89,112 @@ def _format_window_tag(start: pd.Timestamp, end: pd.Timestamp) -> str:
     return f"{s}-{e}"
 
 
+def _extract_peak_from_transactions(
+    path: Path,
+    start_utc: pd.Timestamp,
+    end_utc: pd.Timestamp,
+    *,
+    debug: bool = False,
+) -> Optional[float]:
+    """Return the maximum running peak recorded in the aggregated transaction CSV."""
+
+    try:
+        tx = pd.read_csv(path, low_memory=False)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        if debug:
+            print(f"[warn] failed to read {path}: {exc}")
+        return None
+
+    if tx.empty:
+        return None
+
+    time_col = pick_col(tx, ["first_seen", "block_time", "time", "ts", "block_time_iso"])
+    if not time_col:
+        if debug:
+            print(f"[warn] transaction export lacks timestamp column: {path}")
+        return None
+
+    ts = pd.to_datetime(tx[time_col], utc=True, errors="coerce")
+    tx = tx.loc[pd.notna(ts)].copy()
+    if tx.empty:
+        return None
+
+    tx["__ts"] = ts
+    tx = tx[(tx["__ts"] >= start_utc) & (tx["__ts"] < end_utc)]
+    if tx.empty:
+        return None
+
+    if "running_peak_ui" in tx.columns:
+        series = pd.to_numeric(tx["running_peak_ui"], errors="coerce").dropna()
+        if not series.empty:
+            return float(series.max())
+
+    candidates = []
+    for col in ["running_balance_ui", "post_balance_ui", "pre_balance_ui"]:
+        if col in tx.columns:
+            candidates.append(pd.to_numeric(tx[col], errors="coerce"))
+
+    if not candidates:
+        return None
+
+    combined = pd.concat(candidates, axis=0).dropna()
+    if combined.empty:
+        return None
+
+    return float(combined.max())
+
+
+def _extract_peak_from_history(
+    path: Path,
+    start_utc: pd.Timestamp,
+    end_utc: pd.Timestamp,
+    *,
+    debug: bool = False,
+) -> Optional[float]:
+    """Return the maximum balance observed in the raw Solscan history CSV."""
+
+    try:
+        hist = pd.read_csv(path, low_memory=False)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        if debug:
+            print(f"[warn] failed to read {path}: {exc}")
+        return None
+
+    if hist.empty:
+        return None
+
+    time_col = pick_col(hist, ["time", "ts", "block_time_iso", "block_time", "datetime"])
+    if not time_col:
+        if debug:
+            print(f"[warn] balance history lacks timestamp column: {path}")
+        return None
+
+    ts = pd.to_datetime(hist[time_col], utc=True, errors="coerce")
+    hist = hist.loc[pd.notna(ts)].copy()
+    if hist.empty:
+        return None
+
+    hist["__ts"] = ts
+    hist = hist[(hist["__ts"] >= start_utc) & (hist["__ts"] < end_utc)]
+    if hist.empty:
+        return None
+
+    cols = []
+    if "pre_ui" in hist.columns:
+        cols.append(pd.to_numeric(hist["pre_ui"], errors="coerce"))
+    if "post_ui" in hist.columns:
+        cols.append(pd.to_numeric(hist["post_ui"], errors="coerce"))
+
+    if not cols:
+        return None
+
+    combined = pd.concat(cols, axis=0).dropna()
+    if combined.empty:
+        return None
+
+    return float(combined.max())
+
+
 def _load_balance_peaks(
     balance_dir: Optional[Path],
     addresses: Iterable[str],
@@ -96,75 +202,54 @@ def _load_balance_peaks(
     end: pd.Timestamp,
     *,
     debug: bool = False,
-) -> Dict[str, float]:
-    """Return a mapping of address -> peak balance (UI) from balance history files."""
+) -> Tuple[Dict[str, float], List[str]]:
+    """Return mapping of address → peak balance (UI) sourced from Solscan history.
+
+    The helper also returns a list of addresses for which we could not find a
+    usable history file so the caller can surface that gap to the analyst. We do
+    **not** fall back to swap-based peaks anymore – the on-chain history is the
+    single source of truth for peak balances.
+    """
 
     if balance_dir is None:
-        return {}
+        return {}, sorted({a for a in addresses if a})
 
     if not balance_dir.exists():
         if debug:
             print(f"[warn] balance history directory missing: {balance_dir}")
-        return {}
+        return {}, sorted({a for a in addresses if a})
 
     window_tag = _format_window_tag(start, end)
     peaks: Dict[str, float] = {}
+    missing: List[str] = []
 
     # Normalise timestamps once for filtering.
     start_utc = start.tz_localize("UTC") if start.tzinfo is None else start.tz_convert("UTC")
     end_utc = end.tz_localize("UTC") if end.tzinfo is None else end.tz_convert("UTC")
 
-    time_candidates = ["time", "ts", "block_time_iso", "block_time", "datetime"]
-
     for addr in sorted({a for a in addresses if a}):
         history_path = balance_dir / f"{addr}_{window_tag}.csv"
-        if not history_path.exists():
+        tx_path = balance_dir / f"{addr}_{window_tag}_transactions.csv"
+
+        peak_val = None
+        if tx_path.exists():
+            peak_val = _extract_peak_from_transactions(
+                tx_path, start_utc, end_utc, debug=debug
+            )
+
+        if peak_val is None and history_path.exists():
+            peak_val = _extract_peak_from_history(
+                history_path, start_utc, end_utc, debug=debug
+            )
+
+        if peak_val is None:
             if debug:
-                print(f"[debug] balance history missing for {addr}: {history_path}")
+                print(
+                    f"[debug] unable to derive peak for {addr}; missing or incomplete Solscan history"
+                )
+            missing.append(addr)
             continue
 
-        try:
-            hist = pd.read_csv(history_path, low_memory=False)
-        except Exception as exc:  # pragma: no cover - defensive logging
-            if debug:
-                print(f"[warn] failed to read {history_path}: {exc}")
-            continue
-
-        if hist.empty:
-            continue
-
-        time_col = pick_col(hist, time_candidates)
-        if not time_col:
-            if debug:
-                print(f"[warn] balance history lacks timestamp column: {history_path}")
-            continue
-
-        ts = pd.to_datetime(hist[time_col], utc=True, errors="coerce")
-        hist = hist.loc[pd.notna(ts)].copy()
-        if hist.empty:
-            continue
-
-        hist["__ts"] = ts
-        hist = hist[(hist["__ts"] >= start_utc) & (hist["__ts"] < end_utc)]
-        if hist.empty:
-            continue
-
-        cols = []
-        if "pre_ui" in hist.columns:
-            cols.append(pd.to_numeric(hist["pre_ui"], errors="coerce"))
-        if "post_ui" in hist.columns:
-            cols.append(pd.to_numeric(hist["post_ui"], errors="coerce"))
-
-        if not cols:
-            if debug:
-                print(f"[warn] balance history missing pre_ui/post_ui columns: {history_path}")
-            continue
-
-        combined = pd.concat(cols, axis=0).dropna()
-        if combined.empty:
-            continue
-
-        peak_val = float(combined.max())
         if peak_val < 0:
             peak_val = 0.0
 
@@ -174,8 +259,10 @@ def _load_balance_peaks(
         print(
             f"[info] loaded balance peaks for {len(peaks)}/{len({a for a in addresses if a})} addresses"
         )
+        if missing:
+            print(f"[warn] missing balance history for {len(missing)} addresses")
 
-    return peaks
+    return peaks, sorted(set(missing))
 
 
 def build_metrics(
@@ -230,7 +317,9 @@ def build_metrics(
         .str.strip()
         .tolist()
     )
-    balance_peaks = _load_balance_peaks(balance_dir, addresses, start, end, debug=debug)
+    balance_peaks, missing_history = _load_balance_peaks(
+        balance_dir, addresses, start, end, debug=debug
+    )
 
     # direct vs intermediary
     ilabel = pick_col(window, ["intermediary_label", "route_label", "routing_label"])
@@ -248,19 +337,9 @@ def build_metrics(
     for addr, g in window.sort_values("__ts").groupby(window[addr_col]):
         net_ui = float(g["net_tdccp"].sum())
 
-        # running balance & peak (within the selected window)
-        bal = g["net_tdccp"].cumsum()
-        peak_from_swaps = float(bal.max()) if len(bal) else 0.0
-        peak_from_swaps = max(0.0, peak_from_swaps)
-
-        peak = peak_from_swaps
-        peak_source = "swaps"
-
         hist_peak = balance_peaks.get(addr)
-        if hist_peak is not None:
-            if hist_peak >= peak:
-                peak = hist_peak
-                peak_source = "history"
+        peak_source = "history" if hist_peak is not None else "missing_history"
+        peak = hist_peak if hist_peak is not None else 0.0
 
         n_total = int(len(g))
         n_direct = int(g["__is_direct"].sum())
@@ -281,6 +360,12 @@ def build_metrics(
             "intermediary_txn_count": n_inter,
             "percent_intermediary": round(pct_inter, 6),
         })
+
+    if missing_history and debug:
+        print(
+            "[warn] peak balances defaulted to 0.0 for addresses lacking Solscan history:",
+            ", ".join(missing_history[:10]) + (" …" if len(missing_history) > 10 else ""),
+        )
 
     metrics = pd.DataFrame(out_rows)
     # Stable ordering: larger peak first, then abs(net), then address
