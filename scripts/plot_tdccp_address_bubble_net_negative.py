@@ -45,8 +45,8 @@ def pick_default_path(candidates: Sequence[Path]) -> Path:
 
 DEFAULT_METRICS = pick_default_path(
     [
-        DATA_ROOT / "tdccp_analysis" / "addresses" / "tdccp_address_metrics.csv",
         DATA_ROOT / "addresses" / "tdccp_address_metrics.csv",
+        DATA_ROOT / "tdccp_analysis" / "addresses" / "tdccp_address_metrics.csv",
         SCRIPT_DIR.parent / "data" / "tdccp_address_metrics.csv",
     ]
 )
