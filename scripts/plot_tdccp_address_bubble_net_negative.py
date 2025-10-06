@@ -110,7 +110,8 @@ def addresses_from_negative_csv(path: Path, threshold: float) -> Set[str]:
             "expected buy_tdccp & sell_tdccp or net_ui/buy_minus_sell_tdccp"
         )
 
-    mask = delta <= -float(threshold)
+    magnitude = float(abs(threshold))
+    mask = delta <= -magnitude
     if not mask.any():
         return set()
 
@@ -127,7 +128,8 @@ def addresses_from_metrics(df: pd.DataFrame, threshold: float) -> Set[str]:
     buy = pd.to_numeric(df["buy_tdccp"], errors="coerce").fillna(0.0)
     sell = pd.to_numeric(df["sell_tdccp"], errors="coerce").fillna(0.0)
     delta = buy - sell
-    mask = delta <= -float(threshold)
+    magnitude = float(abs(threshold))
+    mask = delta <= -magnitude
     if not mask.any():
         return set()
     return normalize_addresses(df.loc[mask, "from_address"].astype(str))
@@ -169,7 +171,10 @@ def parse_args() -> argparse.Namespace:
         "--threshold",
         type=float,
         default=10_000.0,
-        help="Minimum sell-minus-buy TDCCP required to include an address (default: 10000).",
+        help=(
+            "Minimum net-negative magnitude (buy minus sell ≤ -THRESHOLD) required "
+            "to include an address (default: 10000)."
+        ),
     )
     parser.add_argument(
         "--window-label",
@@ -213,9 +218,16 @@ def main() -> None:
 
     metrics["from_address"] = metrics["from_address"].astype(str).str.strip()
 
-    threshold = float(args.threshold)
-    if threshold <= 0:
-        raise SystemExit("[error] threshold must be positive")
+    threshold = float(abs(args.threshold))
+    if threshold == 0:
+        raise SystemExit("[error] threshold must be non-zero")
+
+    if threshold.is_integer():
+        threshold_display = f"{int(threshold):,}"
+        threshold_slug = str(int(threshold))
+    else:
+        threshold_display = f"{threshold:,.2f}".rstrip("0").rstrip(".")
+        threshold_slug = str(threshold).replace(".", "_")
 
     qualifying = addresses_from_metrics(metrics, threshold)
     if not qualifying:
@@ -242,7 +254,7 @@ def main() -> None:
                 "[error] no rows remain after limiting to qualifying addresses"
             )
 
-    label_title = f"Net negative ≥{int(threshold):,} TDCCP"
+    label_title = f"Net ≤ -{threshold_display} TDCCP"
     label_map = {addr: label_title for addr in qualifying}
     label_order = [label_title]
 
@@ -258,8 +270,7 @@ def main() -> None:
         outfile = Path(args.outfile)
     else:
         suffix = f"_{window_label}" if window_label else ""
-        threshold_int = int(threshold) if threshold.is_integer() else threshold
-        outfile = OUT_DIR / f"Address_Bubbles_netNegative_{threshold_int}{suffix}.png"
+        outfile = OUT_DIR / f"Address_Bubbles_netNegative_{threshold_slug}{suffix}.png"
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
