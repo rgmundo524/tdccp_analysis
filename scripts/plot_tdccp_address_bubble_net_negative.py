@@ -120,19 +120,27 @@ def addresses_from_negative_csv(path: Path, threshold: float) -> Set[str]:
 
 
 def addresses_from_metrics(df: pd.DataFrame, threshold: float) -> Set[str]:
-    """Return addresses whose buy minus sell TDCCP ≤ -threshold."""
+    """Return addresses whose net TDCCP is ≤ -threshold."""
 
-    if "buy_tdccp" not in df.columns or "sell_tdccp" not in df.columns:
-        return set()
-
-    buy = pd.to_numeric(df["buy_tdccp"], errors="coerce").fillna(0.0)
-    sell = pd.to_numeric(df["sell_tdccp"], errors="coerce").fillna(0.0)
-    delta = buy - sell
     magnitude = float(abs(threshold))
-    mask = delta <= -magnitude
-    if not mask.any():
-        return set()
-    return normalize_addresses(df.loc[mask, "from_address"].astype(str))
+
+    if "net_ui" in df.columns:
+        net = pd.to_numeric(df["net_ui"], errors="coerce")
+        mask = net <= -magnitude
+        if not mask.any():
+            return set()
+        return normalize_addresses(df.loc[mask, "from_address"].astype(str))
+
+    if "buy_tdccp" in df.columns and "sell_tdccp" in df.columns:
+        buy = pd.to_numeric(df["buy_tdccp"], errors="coerce").fillna(0.0)
+        sell = pd.to_numeric(df["sell_tdccp"], errors="coerce").fillna(0.0)
+        delta = buy - sell
+        mask = delta <= -magnitude
+        if not mask.any():
+            return set()
+        return normalize_addresses(df.loc[mask, "from_address"].astype(str))
+
+    return set()
 
 
 def parse_figsize(spec: str) -> tuple[float, float]:
@@ -217,6 +225,9 @@ def main() -> None:
         raise SystemExit("[error] metrics csv missing required 'from_address' column")
 
     metrics["from_address"] = metrics["from_address"].astype(str).str.strip()
+    net_series: Optional[pd.Series] = None
+    if "net_ui" in metrics.columns:
+        net_series = pd.to_numeric(metrics["net_ui"], errors="coerce")
 
     threshold = float(abs(args.threshold))
     if threshold == 0:
@@ -242,13 +253,24 @@ def main() -> None:
 
     available = normalize_addresses(metrics["from_address"].tolist())
     qualifying &= available
+
+    if net_series is not None:
+        negative_mask = net_series <= -threshold
+        negative_addrs = normalize_addresses(
+            metrics.loc[negative_mask, "from_address"].astype(str)
+        )
+        qualifying &= negative_addrs
+
     if not qualifying:
         raise SystemExit(
             "[error] qualifying addresses were not present in metrics after filtering"
         )
 
     if not args.include_others:
-        metrics = metrics[metrics["from_address"].isin(qualifying)].copy()
+        base_mask = metrics["from_address"].isin(qualifying)
+        if net_series is not None:
+            base_mask &= net_series <= -threshold
+        metrics = metrics[base_mask].copy()
         if metrics.empty:
             raise SystemExit(
                 "[error] no rows remain after limiting to qualifying addresses"
